@@ -24,6 +24,9 @@ export const config = {
     internalKey: required("ACCOUNTS_INTERNAL_KEY"),
     clientId: process.env.OAUTH_CLIENT_ID ?? "serika-social-game",
     redirectUri: process.env.OAUTH_REDIRECT_URI ?? "http://127.0.0.1:34517/callback",
+    // Where serika-accounts sends the browser back for the WEB login flow. Must be
+    // registered for the serika-social client.
+    webCallbackUrl: process.env.WEB_OAUTH_CALLBACK ?? "http://localhost:4100/v1/web/callback",
   },
 
   webBaseUrl: process.env.WEB_BASE_URL ?? "http://localhost:3000",

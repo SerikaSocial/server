@@ -5,14 +5,16 @@ import { verifySession, type SessionClaims } from "./tokens.ts";
 /// or invalid. Routes that need a user apply `.use(authed)` and read `session` from context.
 export const authed = new Elysia({ name: "authed" }).derive(
   { as: "scoped" },
-  async ({ headers, set }): Promise<{ session: SessionClaims }> => {
+  async ({ headers, cookie, set }): Promise<{ session: SessionClaims }> => {
+    // Accept either a Bearer token (game client) or the httpOnly cookie (web app).
     const auth = headers.authorization;
-    if (!auth?.startsWith("Bearer ")) {
+    const token = auth?.startsWith("Bearer ") ? auth.slice(7) : cookie.serika_session?.value;
+    if (!token) {
       set.status = 401;
-      throw new Error("missing bearer token");
+      throw new Error("missing session token");
     }
     try {
-      const session = await verifySession(auth.slice(7));
+      const session = await verifySession(token);
       return { session };
     } catch {
       set.status = 401;

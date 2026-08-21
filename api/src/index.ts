@@ -3,6 +3,7 @@ import { cors } from "@elysiajs/cors";
 import { config } from "./config.ts";
 import { prisma, redis } from "./db.ts";
 import { sessionRoutes } from "./routes/session.ts";
+import { webAuthRoutes } from "./routes/web-auth.ts";
 import { worldRoutes } from "./routes/worlds.ts";
 import { instanceRoutes } from "./routes/instances.ts";
 
@@ -17,6 +18,7 @@ const app = new Elysia()
     return { status: dbOk && redisOk ? "ok" : "degraded", service: "serika-social-api", db: dbOk, redis: redisOk };
   })
   .use(sessionRoutes)
+  .use(webAuthRoutes)
   .use(worldRoutes)
   .use(instanceRoutes)
   .onError(({ code, error, set }) => {
