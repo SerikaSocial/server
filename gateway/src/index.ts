@@ -44,6 +44,40 @@ sub.on("pmessage", (_pattern, channel, message) => {
 
 const app = new Elysia()
   .get("/health", () => ({ status: "ok", service: "serika-social-gateway", online: sockets.size }))
+  .post("/internal/push", async ({ body }) => {
+    const { userId, message } = body as { userId: string; message: string };
+    const conns = sockets.get(userId);
+    if (!conns) return { delivered: false, reason: "offline" };
+    let sent = 0;
+    for (const ws of conns) { ws.send(message); sent++; }
+    return { delivered: true, sent };
+  }, {
+    body: t.Object({ userId: t.String(), message: t.String() }),
+  })
+  .post("/internal/invite", async ({ body }) => {
+    const { targetUserId, fromUserId, fromUsername, worldId, worldName } = body as {
+      targetUserId: string; fromUserId: string; fromUsername: string; worldId: string; worldName: string;
+    };
+    const conns = sockets.get(targetUserId);
+    if (!conns) return { delivered: false, reason: "offline" };
+    const msg = JSON.stringify({
+      type: "invite",
+      from: { userId: fromUserId, username: fromUsername },
+      world: { id: worldId, name: worldName },
+      timestamp: Date.now(),
+    });
+    let sent = 0;
+    for (const ws of conns) { ws.send(msg); sent++; }
+    return { delivered: true, sent };
+  }, {
+    body: t.Object({
+      targetUserId: t.String(),
+      fromUserId: t.String(),
+      fromUsername: t.String(),
+      worldId: t.String(),
+      worldName: t.String(),
+    }),
+  })
   .ws("/gateway", {
     query: t.Object({ token: t.String() }),
     async open(ws) {
@@ -80,6 +114,27 @@ const app = new Elysia()
           const flags = await redis.smismember("online:users", ...friends);
           const online = friends.filter((_, i) => flags[i] === 1);
           ws.send(JSON.stringify({ type: "presence", online }));
+          break;
+        }
+        case "invite:respond": {
+          // Client accepts or declines an invite. Publish to the sender's push channel.
+          const { inviteId, accept, fromUserId } = msg;
+          if (fromUserId) {
+            const reply = JSON.stringify({
+              type: "invite:response",
+              inviteId,
+              accept: !!accept,
+              by: userId,
+            });
+            await redis.publish(`gwpush:${fromUserId}`, reply);
+          }
+          break;
+        }
+        case "instance:migrate": {
+          // Client acknowledges a migration. Update presence.
+          if (msg.instanceId) {
+            await redis.hset(`presence:${userId}`, "instanceId", msg.instanceId);
+          }
           break;
         }
       }
