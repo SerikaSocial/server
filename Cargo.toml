@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    # Submodule -> github.com/SerikaSocial/proto. Run `git submodule update --init`
+    # before building, or this member path won't exist.
+    "proto/rust",
+    # Added as each is scaffolded:
+    # "instanced",
+    # "node-agent",
+    # "assetd",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+blake3 = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,12 @@
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Node / Bun
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Rust
+target/
