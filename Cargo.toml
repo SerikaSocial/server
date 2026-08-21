@@ -4,8 +4,8 @@ members = [
     # Submodule -> github.com/SerikaSocial/proto. Run `git submodule update --init`
     # before building, or this member path won't exist.
     "proto/rust",
+    "instanced",
     # Added as each is scaffolded:
-    # "instanced",
     # "node-agent",
     # "assetd",
 ]

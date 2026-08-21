@@ -1,0 +1,24 @@
+{
+  "name": "@serika-social/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --env-file ../.env --watch src/index.ts",
+    "start": "bun --env-file ../.env src/index.ts",
+    "db:generate": "prisma generate --schema ../prisma/schema.prisma",
+    "db:migrate": "prisma migrate dev --schema ../prisma/schema.prisma",
+    "db:deploy": "prisma migrate deploy --schema ../prisma/schema.prisma",
+    "db:seed": "bun --env-file ../.env src/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.1.0",
+    "elysia": "^1.1.26",
+    "@elysiajs/cors": "^1.1.1",
+    "ioredis": "^5.4.1",
+    "jose": "^5.9.6"
+  },
+  "devDependencies": {
+    "prisma": "^6.1.0",
+    "@types/bun": "latest"
+  }
+}

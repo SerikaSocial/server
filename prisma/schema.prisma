@@ -1,0 +1,214 @@
+// Serika Social — durable state.
+//
+// This is NOT the identity source of truth. Credentials live in serika-accounts; the
+// `users` table here mirrors that record keyed by `accountsId`. Live instance rosters live
+// in Redis, not here — Postgres only holds what must survive a restart.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Mirror of a serika-accounts user. Never store passwords here.
+model User {
+  id            String    @id @default(uuid()) @db.Uuid
+  accountsId    String    @unique @map("accounts_id")
+  username      String    @unique
+  displayName   String?   @map("display_name")
+  avatarUrl     String?   @map("avatar_url")
+  isPremium     Boolean   @default(false) @map("is_premium")
+  isAdmin       Boolean   @default(false) @map("is_admin")
+  /// 0=visitor 1=new 2=user 3=known 4=trusted — gates who can upload/host.
+  trustLevel    Int       @default(0) @map("trust_level")
+  currentAvatarId String? @map("current_avatar_id") @db.Uuid
+  lastSeen      DateTime? @map("last_seen")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  authoredWorlds  World[]   @relation("WorldAuthor")
+  authoredAvatars Avatar[]  @relation("AvatarAuthor")
+  ownedInstances  Instance[] @relation("InstanceOwner")
+  friendsA        Friend[]  @relation("FriendA")
+  friendsB        Friend[]  @relation("FriendB")
+  favorites       Favorite[]
+
+  @@index([lastSeen(sort: Desc)])
+  @@map("users")
+}
+
+/// 0=pending 1=accepted (a single row per pair, userA < userB by id).
+model Friend {
+  userAId   String   @map("user_a_id") @db.Uuid
+  userBId   String   @map("user_b_id") @db.Uuid
+  status    Int      @default(0)
+  /// Who sent the request — needed to render incoming vs outgoing while pending.
+  requestedById String @map("requested_by_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  userA User @relation("FriendA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB User @relation("FriendB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@id([userAId, userBId])
+  @@index([userBId])
+  @@map("friends")
+}
+
+model Block {
+  userId    String   @map("user_id") @db.Uuid
+  blockedId String   @map("blocked_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@id([userId, blockedId])
+  @@map("blocks")
+}
+
+model World {
+  id                 String   @id @default(uuid()) @db.Uuid
+  authorId           String?  @map("author_id") @db.Uuid
+  name               String
+  description        String   @default("")
+  tags               String[] @default([])
+  capacity           Int      @default(16)
+  /// 0=private 1=community 2=public
+  releaseStatus      Int      @default(0) @map("release_status")
+  /// Force dedicated relay even for small instances (author override).
+  forceDedicated     Boolean  @default(false) @map("force_dedicated")
+  /// True for the shipped starter world — cannot be deleted, always joinable.
+  isBuiltin          Boolean  @default(false) @map("is_builtin")
+  publishedVersionId String?  @map("published_version_id") @db.Uuid
+  visitCount         BigInt   @default(0) @map("visit_count")
+  /// Decayed popularity for the browser sort.
+  heat               Float    @default(0)
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  author    User?          @relation("WorldAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  versions  WorldVersion[]
+  instances Instance[]
+
+  @@index([tags], type: Gin)
+  @@index([heat(sort: Desc)])
+  @@map("worlds")
+}
+
+model WorldVersion {
+  id              String   @id @default(uuid()) @db.Uuid
+  worldId         String   @map("world_id") @db.Uuid
+  version         Int
+  /// 0=uploaded 1=building 2=ready 3=failed
+  buildStatus     Int      @default(0) @map("build_status")
+  validatorReport Json?    @map("validator_report")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  world  World        @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  assets WorldAsset[]
+
+  @@unique([worldId, version])
+  @@map("world_versions")
+}
+
+model WorldAsset {
+  versionId String @map("version_id") @db.Uuid
+  /// 0=windows 1=linux 2=android
+  platform  Int
+  blake3    Bytes
+  bytes     BigInt
+  cdnKey    String @map("cdn_key")
+
+  version WorldVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+
+  @@id([versionId, platform])
+  @@map("world_assets")
+}
+
+model Avatar {
+  id                 String   @id @default(uuid()) @db.Uuid
+  authorId           String?  @map("author_id") @db.Uuid
+  name               String
+  /// 0=private 1=community 2=public
+  releaseStatus      Int      @default(0) @map("release_status")
+  /// VRChat-style tier: 0=excellent 1=good 2=medium 3=poor 4=verypoor
+  perfRank           Int      @default(0) @map("perf_rank")
+  /// 0=builtin 1=vrm 2=gltf 3=fbx
+  sourceFormat       Int      @default(0) @map("source_format")
+  isBuiltin          Boolean  @default(false) @map("is_builtin")
+  publishedVersionId String?  @map("published_version_id") @db.Uuid
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  author   User?           @relation("AvatarAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  versions AvatarVersion[]
+
+  @@map("avatars")
+}
+
+model AvatarVersion {
+  id        String   @id @default(uuid()) @db.Uuid
+  avatarId  String   @map("avatar_id") @db.Uuid
+  version   Int
+  blake3    Bytes?
+  stats     Json?
+  cdnKey    String?  @map("cdn_key")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  avatar Avatar @relation(fields: [avatarId], references: [id], onDelete: Cascade)
+
+  @@unique([avatarId, version])
+  @@map("avatar_versions")
+}
+
+/// Durable record of an instance. The live roster is in Redis; this row is closed
+/// (closedAt set) when the instance ends.
+model Instance {
+  id             String    @id @default(uuid()) @db.Uuid
+  worldId        String    @map("world_id") @db.Uuid
+  worldVersionId String?   @map("world_version_id") @db.Uuid
+  ownerId        String?   @map("owner_id") @db.Uuid
+  /// 0=public 1=friends 2=friends-of-friends 3=invite 4=private
+  access         Int       @default(0)
+  /// 0=p2p 1=dedicated
+  mode           Int       @default(1)
+  region         String    @default("eu-central")
+  nodeId         String?   @map("node_id")
+  endpoint       String?
+  capacity       Int       @default(16)
+  playerCount    Int       @default(0) @map("player_count")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  closedAt       DateTime? @map("closed_at")
+
+  world World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  owner User? @relation("InstanceOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+
+  @@index([worldId, closedAt])
+  @@index([nodeId])
+  @@map("instances")
+}
+
+model Favorite {
+  userId   String   @map("user_id") @db.Uuid
+  /// 0=world 1=avatar 2=user
+  kind     Int
+  targetId String   @map("target_id") @db.Uuid
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, kind, targetId])
+  @@map("favorites")
+}
+
+model ModerationAction {
+  id         String    @id @default(uuid()) @db.Uuid
+  actorId    String?   @map("actor_id") @db.Uuid
+  targetId   String    @map("target_id") @db.Uuid
+  instanceId String?   @map("instance_id") @db.Uuid
+  /// 0=warn 1=kick 2=instance-ban 3=platform-ban
+  kind       Int
+  reason     String    @default("")
+  expiresAt  DateTime? @map("expires_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([targetId])
+  @@map("moderation_actions")
+}
