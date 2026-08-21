@@ -48,6 +48,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       return {
         instance: serializeInstance(instance),
         endpoint: instance.endpoint,
+        worldName: world.name,
         ...ticket,
       };
     },

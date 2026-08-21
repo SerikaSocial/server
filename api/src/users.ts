@@ -29,6 +29,14 @@ export async function upsertUser(profile: AccountsProfile) {
     },
   });
 
+  // Trust level mirrors standing: admins are fully trusted, premium members get a bump.
+  // Never lower a manually-granted level — only raise the floor implied by their status.
+  const floor = user.isAdmin ? 4 : user.isPremium ? 2 : 0;
+  if (user.trustLevel < floor) {
+    await prisma.user.update({ where: { id: user.id }, data: { trustLevel: floor } });
+    user.trustLevel = floor;
+  }
+
   // Give brand-new accounts the built-in default avatar so they're never avatar-less.
   if (!user.currentAvatarId) {
     const dflt = await prisma.avatar.findFirst({ where: { isBuiltin: true }, orderBy: { createdAt: "asc" } });
