@@ -39,10 +39,10 @@ export const webAuthRoutes = new Elysia({ prefix: "/v1/web" })
     return redirect(u.toString());
   })
 
-  // Provider redirect lands here. Exchange, verify (with ban check), mirror, set cookie.
+  // Provider redirect lands here. Exchange, verify (with ban check), mirror, hand off.
   .get(
     "/callback",
-    async ({ query, cookie, redirect, set }) => {
+    async ({ query, redirect, set }) => {
       const verifier = await redis.get(`weblogin:${query.state}`);
       if (!verifier) {
         set.status = 400;
@@ -70,15 +70,29 @@ export const webAuthRoutes = new Elysia({ prefix: "/v1/web" })
         isAdmin: user.isAdmin,
       });
 
-      // httpOnly session cookie for the web app's domain.
-      cookie.serika_session.set({
-        value: session,
-        httpOnly: true,
-        sameSite: "lax",
-        path: "/",
-        maxAge: config.sessionTtlSeconds,
-      });
-      return redirect(`${config.webBaseUrl}/profile`);
+      // The api and the web app are on different registrable domains (api-social.ado.ink vs
+      // social.serika.dev), so a cookie the api sets here would never reach the web app. Hand
+      // the session off via a one-time code the web app claims and turns into its OWN cookie,
+      // on its own origin. The session JWT never travels in a URL.
+      const handoff = base64url(randomBytes(24));
+      await redis.set(`webhandoff:${handoff}`, session, "EX", 120);
+      return redirect(`${config.webBaseUrl}/auth/finish?code=${handoff}`);
     },
     { query: t.Object({ code: t.String(), state: t.String() }) },
+  )
+
+  // The web app claims the one-time handoff code and receives the session token, which it
+  // then stores as a cookie on its own origin. Single-use: the code is deleted on claim.
+  .get(
+    "/claim",
+    async ({ query, set }) => {
+      const session = await redis.get(`webhandoff:${query.code}`);
+      if (!session) {
+        set.status = 400;
+        return { error: "invalid_or_expired_code" };
+      }
+      await redis.del(`webhandoff:${query.code}`);
+      return { session, maxAge: config.sessionTtlSeconds };
+    },
+    { query: t.Object({ code: t.String() }) },
   );
