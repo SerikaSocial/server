@@ -50,7 +50,9 @@ export const webAuthRoutes = new Elysia({ prefix: "/v1/web" })
       }
       await redis.del(`weblogin:${query.state}`);
 
-      const token = await exchangeCode(query.code, verifier);
+      // Exchange with the SAME client_id and redirect_uri the web login used, not the game
+      // client — the provider requires them to match the authorize request.
+      const token = await exchangeCode(query.code, verifier, "serika-social", webRedirectUri());
       if (!token) {
         set.status = 400;
         return { error: "code_exchange_failed" };

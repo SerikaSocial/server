@@ -20,17 +20,24 @@ export interface VerifyOAuthResult {
   user?: AccountsProfile;
 }
 
-/// Exchange a PKCE authorization code for an opaque OAuth access token. The game is a
-/// public client, so there is no client_secret — only the code_verifier.
-export async function exchangeCode(code: string, codeVerifier: string): Promise<{ access_token: string; refresh_token?: string } | null> {
+/// Exchange a PKCE authorization code for an opaque OAuth access token. These are public
+/// clients, so there is no client_secret — only the code_verifier. The `client_id` and
+/// `redirect_uri` MUST match the ones used in the authorize request, or the provider rejects
+/// the exchange; callers pass the pair for their flow (game loopback vs web callback).
+export async function exchangeCode(
+  code: string,
+  codeVerifier: string,
+  clientId: string = config.accounts.clientId,
+  redirectUri: string = config.accounts.redirectUri,
+): Promise<{ access_token: string; refresh_token?: string } | null> {
   const res = await fetch(`${config.accounts.baseUrl}/api/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       grant_type: "authorization_code",
       code,
-      redirect_uri: config.accounts.redirectUri,
-      client_id: config.accounts.clientId,
+      redirect_uri: redirectUri,
+      client_id: clientId,
       code_verifier: codeVerifier,
     }),
   });
