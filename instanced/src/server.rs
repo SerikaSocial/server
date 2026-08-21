@@ -21,12 +21,32 @@ use crate::ticket::TicketVerifier;
 /// Drop a peer we haven't heard from in this long. Clients ping ~every 2s.
 const PEER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// AOI: only forward pose frames to peers within this radius (meters).
+/// The default world is 40x40m so 25m covers most of it with culling benefit.
+const AOI_RADIUS: f32 = 25.0;
+
+/// LOD: peers beyond this distance get every Nth pose frame (reduced rate).
+const LOD_RADIUS: f32 = 15.0;
+/// Send every Nth frame to distant peers (LOD1). 2 = 10Hz, 4 = 5Hz.
+const LOD_SKIP: u32 = 2;
+
+/// Per-peer bandwidth budget: warn if a single peer exceeds this in bytes/sec.
+const BW_BUDGET_BPS: u64 = 64 * 1024;
+
 struct Peer {
     peer_id: u32,
     instance_id: String,
     user_id: String,
     username: String,
     last_seen: Instant,
+    /// Last known position, extracted from pose frames for AOI.
+    position: [f32; 3],
+    /// Frame counter for LOD rate reduction.
+    frame_seq: u32,
+    /// Bytes sent to this peer in the current window.
+    bytes_sent: u64,
+    /// Window start for bandwidth tracking.
+    bw_window_start: Instant,
 }
 
 pub struct Server {
@@ -142,6 +162,10 @@ impl Server {
             user_id: claims.sub.clone(),
             username: claims.username.clone(),
             last_seen: Instant::now(),
+            position: [0.0; 3],
+            frame_seq: 0,
+            bytes_sent: 0,
+            bw_window_start: Instant::now(),
         };
 
         let welcome = self.build_welcome(peer_id, &claims.instance_id, from);
@@ -189,16 +213,76 @@ impl Server {
     ) {
         let Some(peer) = self.peers.get_mut(&from) else { return };
         peer.last_seen = Instant::now();
+        peer.frame_seq += 1;
         // Reject malformed frames at the edge — decoding is a trust boundary and a bad
         // frame must never reach another client.
         if !validate(payload) {
             return;
         }
-        let (peer_id, instance_id) = (peer.peer_id, peer.instance_id.clone());
+        let (peer_id, instance_id, sender_pos, sender_seq) =
+            (peer.peer_id, peer.instance_id.clone(), peer.position, peer.frame_seq);
         let out = write_relayed(ty, peer_id, payload);
-        // Ownership model: the sender is authoritative for its own avatar, so we forward
-        // verbatim to everyone else. AOI/priority filtering slots in here at M2.
-        self.broadcast(&instance_id, &out, Some(from)).await;
+
+        // AOI + LOD: only forward to peers within range. Distant peers get every Nth frame.
+        let Some(addrs) = self.by_instance.get(&instance_id) else { return };
+        for &addr in addrs {
+            if addr == from {
+                continue;
+            }
+            let Some(dest) = self.peers.get_mut(&addr) else { continue };
+
+            // Extract position from pose frame if this is a Pose message.
+            if ty == MsgType::Pose {
+                let dist_sq = dist_squared(sender_pos, dest.position);
+                if dist_sq > AOI_RADIUS * AOI_RADIUS {
+                    continue; // out of AOI range — skip entirely
+                }
+                if dist_sq > LOD_RADIUS * LOD_RADIUS {
+                    // LOD1: distant peer gets reduced rate
+                    if sender_seq % LOD_SKIP != 0 {
+                        continue;
+                    }
+                }
+            }
+
+            // Voice always goes through (voice is small and important).
+            let _ = self.socket.send_to(&out, addr).await;
+            dest.bytes_sent += out.len() as u64;
+        }
+
+        // Update sender position after fan-out.
+        if ty == MsgType::Pose {
+            if let Ok(pf) = PoseFrame::decode(payload) {
+                if let Some(p) = self.peers.get_mut(&from) {
+                    p.position = pf.root_pos;
+                }
+            }
+        }
+
+        // Bandwidth budget check per destination.
+        let now = Instant::now();
+        if let Some(addrs) = self.by_instance.get(&instance_id) {
+            for &addr in addrs {
+                if addr == from {
+                    continue;
+                }
+                if let Some(dest) = self.peers.get_mut(&addr) {
+                    let elapsed = now.duration_since(dest.bw_window_start);
+                    if elapsed >= Duration::from_secs(1) {
+                        if dest.bytes_sent > BW_BUDGET_BPS {
+                            tracing::warn!(
+                                peer_id = dest.peer_id,
+                                bytes_per_sec = dest.bytes_sent,
+                                budget = BW_BUDGET_BPS,
+                                "bandwidth budget exceeded"
+                            );
+                        }
+                        dest.bytes_sent = 0;
+                        dest.bw_window_start = now;
+                    }
+                }
+            }
+        }
     }
 
     /// Send `msg` to everyone in the instance, optionally excluding one address.
@@ -269,4 +353,12 @@ fn validate_pose(payload: &[u8]) -> bool {
 
 fn validate_voice(payload: &[u8]) -> bool {
     VoiceFrame::decode(payload).is_ok()
+}
+
+/// Squared Euclidean distance between two positions. Used for AOI checks.
+fn dist_squared(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let dx = a[0] - b[0];
+    let dy = a[1] - b[1];
+    let dz = a[2] - b[2];
+    dx * dx + dy * dy + dz * dz
 }
