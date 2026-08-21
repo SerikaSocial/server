@@ -3,8 +3,7 @@
   "private": true,
   "workspaces": [
     "api",
-    "gateway",
-    "allocator"
+    "gateway"
   ],
   "scripts": {
     "proto:test": "cargo test -p serika-proto",

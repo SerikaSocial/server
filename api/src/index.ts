@@ -6,6 +6,7 @@ import { sessionRoutes } from "./routes/session.ts";
 import { webAuthRoutes } from "./routes/web-auth.ts";
 import { worldRoutes } from "./routes/worlds.ts";
 import { instanceRoutes } from "./routes/instances.ts";
+import { assetRoutes } from "./routes/assets.ts";
 
 const app = new Elysia()
   .use(cors())
@@ -21,6 +22,7 @@ const app = new Elysia()
   .use(webAuthRoutes)
   .use(worldRoutes)
   .use(instanceRoutes)
+  .use(assetRoutes)
   .onError(({ code, error, set }) => {
     // Elysia surfaces our thrown auth errors here; keep 401s as 401s, everything else 500.
     if (set.status === 401) return { error: String(error instanceof Error ? error.message : error) };

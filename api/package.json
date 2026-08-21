@@ -11,9 +11,11 @@
     "db:seed": "bun --env-file ../.env src/seed.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1115.0",
+    "@aws-sdk/s3-request-presigner": "^3.1115.0",
+    "@elysiajs/cors": "^1.1.1",
     "@prisma/client": "^6.1.0",
     "elysia": "^1.1.26",
-    "@elysiajs/cors": "^1.1.1",
     "ioredis": "^5.4.1",
     "jose": "^5.9.6"
   },
