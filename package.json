@@ -9,6 +9,7 @@
     "proto:test": "cargo test -p serika-proto",
     "dev:api": "bun run --filter '@serika-social/api' dev",
     "dev:gateway": "bun run --filter '@serika-social/gateway' dev",
+    "dev:all": "../infra/dev-all.sh",
     "up": "../infra/dev-up.sh",
     "down": "docker stop serika-social-postgres serika-social-redis"
   },

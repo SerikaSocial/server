@@ -31,16 +31,26 @@ export function decideMode(h: HostHints): number {
 
 /// Registry of relay nodes. A node-agent registers its process under `node:{id}` with a
 /// TTL heartbeat; we read the set to place instances. In M1 a single relay self-registers.
+/// Stale members (whose node:{id} hash has expired) are pruned from the set so dead relays
+/// don't accumulate.
 export async function pickDedicatedNode(): Promise<{ nodeId: string; endpoint: string } | null> {
   const ids = await redis.smembers("nodes");
   if (ids.length === 0) return null;
   // Least-loaded by advertised player count. Ties broken arbitrarily.
   let best: { nodeId: string; endpoint: string; load: number } | null = null;
+  const stale: string[] = [];
   for (const id of ids) {
     const info = await redis.hgetall(`node:${id}`);
-    if (!info.endpoint) continue; // stale membership without a live heartbeat
+    if (!info.endpoint) {
+      // The node hash expired (relay crashed or stopped heartbeating) — remove from set.
+      stale.push(id);
+      continue;
+    }
     const load = Number(info.load ?? 0);
     if (!best || load < best.load) best = { nodeId: id, endpoint: info.endpoint, load };
+  }
+  if (stale.length > 0) {
+    await redis.srem("nodes", ...stale);
   }
   return best ? { nodeId: best.nodeId, endpoint: best.endpoint } : null;
 }

@@ -245,17 +245,21 @@ impl Server {
     }
 
     /// Advertise this relay to the allocator: node membership + current load.
+    /// The node hash carries a 15-second TTL so a crashed relay stops receiving traffic
+    /// after one heartbeat cycle instead of lingering as a dead endpoint forever.
     async fn heartbeat(&mut self) {
         let endpoint = std::env::var("PUBLIC_ENDPOINT").unwrap_or_default();
         let load = self.peers.len();
+        let node_key = format!("node:{}", self.node_id);
         let _: Result<(), _> = self.redis.sadd("nodes", &self.node_id).await;
         let _: Result<(), _> = self
             .redis
             .hset_multiple(
-                format!("node:{}", self.node_id),
+                &node_key,
                 &[("endpoint", endpoint.as_str()), ("load", &load.to_string())],
             )
             .await;
+        let _: Result<(), _> = self.redis.expire(&node_key, 15).await;
     }
 }
 
