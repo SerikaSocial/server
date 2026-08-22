@@ -330,21 +330,12 @@ export function pmxToGlb(
 
     // JOINTS_0 and WEIGHTS_0 — use up to 4 bones per vertex
     const jointsView = buf.beginView(TARGET_ARRAY_BUFFER);
-    const weightsView = buf.beginView(TARGET_ARRAY_BUFFER);
     for (const vi of usedVerts) {
       const v = model.vertices[vi];
       const bones = v.bones.slice(0, 4);
-      const weights = v.weights.slice(0, 4);
-      // Pad to 4
       while (bones.length < 4) bones.push(0);
-      while (weights.length < 4) weights.push(0);
-      // Normalize weights
-      const sum = weights.reduce((a, b) => a + b, 0) || 1;
       for (let j = 0; j < 4; j++) {
         buf.u16(bones[j] >= 0 ? bones[j] : 0);
-      }
-      for (let j = 0; j < 4; j++) {
-        buf.f32(weights[j] / sum);
       }
     }
     buf.padTo4();
@@ -353,6 +344,18 @@ export function pmxToGlb(
       bufferView: jointsView, componentType: COMPONENT_UNSIGNED_SHORT, count: usedVerts.length,
       type: "VEC4",
     });
+
+    const weightsView = buf.beginView(TARGET_ARRAY_BUFFER);
+    for (const vi of usedVerts) {
+      const v = model.vertices[vi];
+      const weights = v.weights.slice(0, 4);
+      while (weights.length < 4) weights.push(0);
+      const sum = weights.reduce((a, b) => a + b, 0) || 1;
+      for (let j = 0; j < 4; j++) {
+        buf.f32(weights[j] / sum);
+      }
+    }
+    buf.padTo4();
     const weightsAcc = accessors.length;
     accessors.push({
       bufferView: weightsView, componentType: COMPONENT_FLOAT, count: usedVerts.length,
