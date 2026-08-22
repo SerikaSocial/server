@@ -97,6 +97,26 @@ export const assetFileRoutes = new Elysia({ prefix: "/v1/assets/file" }).get(
 
 export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
   .use(authed)
+  // The avatar the game should equip for this user: their chosen one, else the newest default
+  // outfit (so nobody is a capsule). Returns { avatar } or { avatar: null }.
+  .get("/current", async ({ session }) => {
+    const user = await prisma.user.findUnique({
+      where: { id: session.sub },
+      select: { currentAvatarId: true },
+    });
+    let avatar = null;
+    if (user?.currentAvatarId) {
+      avatar = await prisma.avatar.findUnique({ where: { id: user.currentAvatarId }, include: withVersion });
+    }
+    if (!avatar) {
+      avatar = await prisma.avatar.findFirst({
+        where: { isDefaultOutfit: true },
+        include: withVersion,
+        orderBy: { createdAt: "desc" },
+      });
+    }
+    return { avatar: avatar ? serialize(avatar) : null };
+  })
   .get("/mine/list", async ({ session }) => {
     const avatars = await prisma.avatar.findMany({
       where: { authorId: session.sub },
