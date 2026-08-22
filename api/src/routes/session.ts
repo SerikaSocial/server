@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { exchangeCode, verifyOAuth, authorizeUrl, loginWithEmail } from "../accounts.ts";
+import { exchangeCode, verifyOAuth, verifyAccountsSession, authorizeUrl, loginWithEmail } from "../accounts.ts";
 import { upsertUser } from "../users.ts";
 import { signSession } from "../tokens.ts";
 import { authed } from "../auth-plugin.ts";
@@ -62,13 +62,18 @@ export const sessionRoutes = new Elysia({ prefix: "/v1/session" })
   .post(
     "/login",
     async ({ body, set }) => {
-      const token = await loginWithEmail(body.email, body.password);
-      if (!token) {
+      const login = await loginWithEmail(body.email, body.password, body.two_factor_code);
+      if (!login.token) {
+        // 401 for all of it: bad credentials, unverified email, or a 2FA code needed —
+        // the client keys off the `error` code (e.g. TWO_FACTOR_REQUIRED) to react.
         set.status = 401;
-        return { error: "invalid_credentials" };
+        return { error: login.error ?? "invalid_credentials" };
       }
 
-      const result = await verifyOAuth(token.access_token);
+      // The email path issues a session JWT — verify it via the JWT endpoint, NOT
+      // verifyOAuth (which only resolves opaque OAuth access tokens and would reject this,
+      // the original cause of `verify_failed`).
+      const result = await verifyAccountsSession(login.token);
       if (!result.valid || !result.user) {
         set.status = 403;
         return { error: result.code === "ACCOUNT_BANNED" ? "banned" : "verify_failed" };
@@ -94,7 +99,13 @@ export const sessionRoutes = new Elysia({ prefix: "/v1/session" })
         },
       };
     },
-    { body: t.Object({ email: t.String(), password: t.String() }) },
+    {
+      body: t.Object({
+        email: t.String(),
+        password: t.String(),
+        two_factor_code: t.Optional(t.String()),
+      }),
+    },
   )
 
   // Who am I. Requires a valid session token.

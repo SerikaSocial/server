@@ -63,6 +63,25 @@ export async function verifyOAuth(accessToken: string): Promise<VerifyOAuthResul
   return (await res.json()) as VerifyOAuthResult;
 }
 
+/// Validate a serika-accounts **session JWT** (the token returned by /api/auth/login) and
+/// check the ban flag. This is the JWT sibling of verifyOAuth: /internal/verify runs
+/// jwt.verify() and looks the token up in the Session collection, whereas /internal/verify-oauth
+/// only resolves opaque OAuth access tokens. The email/password login path issues a session
+/// JWT — verifying it against verify-oauth is why in-game login returned `verify_failed`.
+/// Both endpoints return the identical `{ valid, code, user }` shape.
+export async function verifyAccountsSession(sessionJwt: string): Promise<VerifyOAuthResult> {
+  const res = await fetch(`${config.accounts.baseUrl}/internal/verify`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-service-key": config.accounts.internalKey,
+    },
+    body: JSON.stringify({ token: sessionJwt }),
+  });
+  if (!res.ok) return { valid: false, error: `accounts responded ${res.status}` };
+  return (await res.json()) as VerifyOAuthResult;
+}
+
 /// Build the authorize URL the client opens in a browser to begin the PKCE flow.
 export function authorizeUrl(state: string, codeChallenge: string): string {
   const u = new URL(`${config.accounts.baseUrl}/api/oauth/authorize`);
@@ -76,19 +95,37 @@ export function authorizeUrl(state: string, codeChallenge: string): string {
   return u.toString();
 }
 
-/// Login with email+password directly (no browser). Calls serika-accounts POST /login,
-/// then verifies the resulting token via /internal/verify-oauth for the ban check.
+export interface EmailLoginResult {
+  /// The serika-accounts session JWT on success — verify it with verifyAccountsSession(),
+  /// NOT verifyOAuth() (it is not an OAuth access token).
+  token?: string;
+  /// Set on failure. Mirrors serika-accounts' own codes where it sends them
+  /// (EMAIL_NOT_VERIFIED, TWO_FACTOR_REQUIRED, TWO_FACTOR_INVALID, AGE_RESTRICTION),
+  /// otherwise `invalid_credentials`.
+  error?: string;
+}
+
+/// Login with email+password directly (no browser). Calls serika-accounts POST
+/// /api/auth/login and returns its session JWT (or a distinguishable failure reason).
 export async function loginWithEmail(
   email: string,
   password: string,
-): Promise<{ access_token: string } | null> {
-  const res = await fetch(`${config.accounts.baseUrl}/api/auth/login`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password, productId: "serika-social" }),
-  });
-  if (!res.ok) return null;
-  const json = (await res.json()) as any;
-  if (!json.success || !json.token) return null;
-  return { access_token: json.token };
+  twoFactorCode?: string,
+): Promise<EmailLoginResult> {
+  let json: any;
+  try {
+    const res = await fetch(`${config.accounts.baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, twoFactorCode, productId: "serika-social" }),
+    });
+    json = await res.json().catch(() => ({}));
+  } catch {
+    return { error: "accounts_unreachable" };
+  }
+
+  // serika-accounts returns { token } on success and { error, code? } on failure.
+  if (json?.token) return { token: json.token };
+  // Prefer a machine-readable code; fall back to the human message, then a generic.
+  return { error: json?.code ?? json?.error ?? "invalid_credentials" };
 }

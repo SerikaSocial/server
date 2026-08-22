@@ -14,6 +14,7 @@
     "down": "docker stop serika-social-postgres serika-social-redis"
   },
   "devDependencies": {
+    "bun-types": "^1.4.0",
     "prisma": "^6.19.3"
   },
   "dependencies": {

@@ -34,6 +34,7 @@ model User {
   friendsA        Friend[]  @relation("FriendA")
   friendsB        Friend[]  @relation("FriendB")
   favorites       Favorite[]
+  reviews         Review[]
 
   @@index([lastSeen(sort: Desc)])
   @@map("users")
@@ -89,6 +90,7 @@ model World {
   author    User?          @relation("WorldAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   versions  WorldVersion[]
   instances Instance[]
+  reviews   Review[]
 
   @@index([tags], type: Gin)
   @@index([heat(sort: Desc)])
@@ -201,6 +203,25 @@ model Favorite {
 
   @@id([userId, kind, targetId])
   @@map("favorites")
+}
+
+/// A user's rating + written review of a world. One row per (world, user) — upsert on POST.
+model Review {
+  id        String   @id @default(cuid())
+  worldId   String   @map("world_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  /// 1..5
+  rating    Int
+  body      String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  world World @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([worldId, userId])
+  @@index([worldId])
+  @@map("reviews")
 }
 
 model ModerationAction {
