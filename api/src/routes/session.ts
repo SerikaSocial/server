@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { exchangeCode, verifyOAuth, authorizeUrl } from "../accounts.ts";
+import { exchangeCode, verifyOAuth, authorizeUrl, loginWithEmail } from "../accounts.ts";
 import { upsertUser } from "../users.ts";
 import { signSession } from "../tokens.ts";
 import { authed } from "../auth-plugin.ts";
@@ -54,6 +54,47 @@ export const sessionRoutes = new Elysia({ prefix: "/v1/session" })
       };
     },
     { body: t.Object({ code: t.String(), code_verifier: t.String() }) },
+  )
+
+  // Email + password login (no browser required). The client posts credentials,
+  // we authenticate against serika-accounts, verify (WITH ban check), mirror the
+  // user, and issue our own session token — same as the PKCE exchange path.
+  .post(
+    "/login",
+    async ({ body, set }) => {
+      const token = await loginWithEmail(body.email, body.password);
+      if (!token) {
+        set.status = 401;
+        return { error: "invalid_credentials" };
+      }
+
+      const result = await verifyOAuth(token.access_token);
+      if (!result.valid || !result.user) {
+        set.status = 403;
+        return { error: result.code === "ACCOUNT_BANNED" ? "banned" : "verify_failed" };
+      }
+
+      const user = await upsertUser(result.user);
+      const session = await signSession({
+        sub: user.id,
+        accountsId: user.accountsId,
+        username: user.username,
+        isAdmin: user.isAdmin,
+      });
+
+      return {
+        session_token: session,
+        user: {
+          id: user.id,
+          username: user.username,
+          displayName: user.displayName,
+          avatarUrl: user.avatarUrl,
+          isPremium: user.isPremium,
+          currentAvatarId: user.currentAvatarId,
+        },
+      };
+    },
+    { body: t.Object({ email: t.String(), password: t.String() }) },
   )
 
   // Who am I. Requires a valid session token.

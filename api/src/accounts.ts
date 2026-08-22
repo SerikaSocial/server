@@ -75,3 +75,20 @@ export function authorizeUrl(state: string, codeChallenge: string): string {
   u.searchParams.set("code_challenge_method", "S256");
   return u.toString();
 }
+
+/// Login with email+password directly (no browser). Calls serika-accounts POST /login,
+/// then verifies the resulting token via /internal/verify-oauth for the ban check.
+export async function loginWithEmail(
+  email: string,
+  password: string,
+): Promise<{ access_token: string } | null> {
+  const res = await fetch(`${config.accounts.baseUrl}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, productId: "serika-social" }),
+  });
+  if (!res.ok) return null;
+  const json = (await res.json()) as any;
+  if (!json.success || !json.token) return null;
+  return { access_token: json.token };
+}
