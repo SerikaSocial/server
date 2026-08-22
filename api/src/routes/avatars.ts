@@ -2,7 +2,7 @@ import { Elysia, t } from "elysia";
 import { readFile } from "node:fs/promises";
 import { authed, adminOnly } from "../auth-plugin.ts";
 import { prisma } from "../db.ts";
-import { putBytes, assetPublicUrl, localAssetPath } from "../storage.ts";
+import { putBytes, assetPublicUrl, localAssetPath, getObjectBytes } from "../storage.ts";
 import { vrmOrGlbToSka, sniffKind } from "../ska.ts";
 
 // Avatar catalogue + upload → `.ska` conversion.
@@ -73,6 +73,15 @@ export const avatarPublicRoutes = new Elysia({ prefix: "/v1/avatars" })
     const a = await prisma.avatar.findUnique({ where: { id: params.id }, include: withVersion });
     if (!a) { set.status = 404; return { error: "not_found" }; }
     return serialize(a);
+  })
+  .get("/:id/file", async ({ params, set }) => {
+    const a = await prisma.avatar.findUnique({ where: { id: params.id }, include: withVersion });
+    if (!a || !a.versions?.[0]?.cdnKey) { set.status = 404; return { error: "not_found" }; }
+    const bytes = await getObjectBytes(a.versions[0].cdnKey);
+    if (!bytes) { set.status = 404; return { error: "file_missing" }; }
+    set.headers["content-type"] = "application/octet-stream";
+    set.headers["cache-control"] = "public, max-age=31536000, immutable";
+    return new Response(bytes as BufferSource);
   });
 
 // Local-disk asset serving fallback (used when B2/CDN isn't configured). Content-addressed keys

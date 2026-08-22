@@ -1,7 +1,7 @@
-import { S3Client, HeadObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, HeadObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 // S3-compatible object storage. The plan's default backend is Backblaze B2 (already used by
@@ -102,4 +102,23 @@ export function assetPublicUrl(key: string): string {
   if (cdnBase) return cdnUrl(key);
   const apiBase = (process.env.PUBLIC_API_URL ?? "").replace(/\/$/, "");
   return `${apiBase}/v1/assets/file/${key}`;
+}
+
+/// Fetch object bytes from B2 (or local disk when S3 isn't configured). Used by the
+/// `/v1/avatars/:id/file` proxy route so the web app never depends on the CDN being up.
+export async function getObjectBytes(key: string): Promise<Uint8Array | null> {
+  if (client) {
+    try {
+      const r = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      const buf = await r.Body!.transformToByteArray();
+      return buf;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return await readFile(localAssetPath(key));
+  } catch {
+    return null;
+  }
 }
