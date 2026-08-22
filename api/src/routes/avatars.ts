@@ -4,6 +4,9 @@ import { authed, adminOnly } from "../auth-plugin.ts";
 import { prisma } from "../db.ts";
 import { putBytes, assetPublicUrl, localAssetPath, getObjectBytes } from "../storage.ts";
 import { vrmOrGlbToSka, pmxToSka, sniffKind, extractThumbnail } from "../ska.ts";
+import { parsePMX } from "../pmx.ts";
+import { unzipSync } from "fflate";
+import { extname } from "node:path";
 
 // Avatar catalogue + upload → `.ska` conversion.
 //
@@ -12,6 +15,64 @@ import { vrmOrGlbToSka, pmxToSka, sniffKind, extractThumbnail } from "../ska.ts"
 // with guidance unless an external FBX2glTF step is wired later — VRM/GLB cover the common case.
 
 const MAX_AVATAR_BYTES = 64 * 1024 * 1024;
+const MAX_THUMBNAIL_BYTES = 8 * 1024 * 1024;
+
+const IMAGE_MIME: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+
+/// Extract a PMX file and its textures from a zip buffer.
+/// Returns { pmxBytes, textureBytes } where textureBytes maps texture index → { bytes, mimeType }.
+function extractPmxZip(zipBytes: Uint8Array): { pmxBytes: Uint8Array; textureBytes: Map<number, { bytes: Uint8Array; mimeType: string }> } {
+  const files = unzipSync(zipBytes);
+  // Find the .pmx file (prefer the one at the root or shallowest path)
+  let pmxPath: string | null = null;
+  let pmxDepth = Infinity;
+  for (const path of Object.keys(files)) {
+    if (path.toLowerCase().endsWith(".pmx")) {
+      const depth = path.split("/").length;
+      if (depth < pmxDepth) { pmxDepth = depth; pmxPath = path; }
+    }
+  }
+  if (!pmxPath) throw new Error("no .pmx file found in the zip archive");
+  const pmxBytes = files[pmxPath];
+  const pmxDir = pmxPath.includes("/") ? pmxPath.slice(0, pmxPath.lastIndexOf("/") + 1) : "";
+
+  // Parse the PMX to get texture paths, then load matching files from the zip
+  const model = parsePMX(pmxBytes as Uint8Array);
+  const textureBytes = new Map<number, { bytes: Uint8Array; mimeType: string }>();
+  for (let i = 0; i < model.textures.length; i++) {
+    const texPath = model.textures[i].path.replace(/\\/g, "/");
+    // Try: (1) relative to PMX dir, (2) relative to zip root, (3) basename match
+    const candidates = [
+      pmxDir + texPath,
+      texPath,
+      texPath.split("/").pop()!,
+      pmxDir + texPath.split("/").pop()!,
+    ];
+    for (const candidate of candidates) {
+      // Also try case-insensitive match
+      let found = files[candidate];
+      if (!found) {
+        const lower = candidate.toLowerCase();
+        for (const key of Object.keys(files)) {
+          if (key.toLowerCase() === lower) { found = files[key]; break; }
+        }
+      }
+      if (found) {
+        const ext = extname(texPath).toLowerCase();
+        const mimeType = IMAGE_MIME[ext] ?? "application/octet-stream";
+        textureBytes.set(i, { bytes: found as Uint8Array, mimeType });
+        break;
+      }
+    }
+  }
+  return { pmxBytes: pmxBytes as Uint8Array, textureBytes };
+}
 
 function skaKeyFor(hashHex: string): string {
   return `av/${hashHex.slice(0, 2)}/${hashHex}.ska`;
@@ -135,7 +196,9 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
     return { avatars: avatars.map(serialize) };
   })
 
-  // Upload a VRM/GLB (multipart `file`), convert to `.ska`, store, and record it.
+  // Upload a VRM/GLB/PMX (multipart `file`), convert to `.ska`, store, and record it.
+  // For PMX models with external textures, upload a .zip containing the .pmx + texture folder.
+  // An optional `thumbnail` image can be uploaded as the avatar's preview picture.
   .post(
     "/upload",
     async ({ body, session, set }) => {
@@ -144,19 +207,39 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
       const bytes = new Uint8Array(await file.arrayBuffer());
       if (bytes.length > MAX_AVATAR_BYTES) { set.status = 413; return { error: "too_large", maxBytes: MAX_AVATAR_BYTES }; }
 
-      const kind = sniffKind(bytes);
+      // Check if this is a zip file (for PMX + textures)
+      const isZip = bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b &&
+                    (bytes[2] === 0x03 || bytes[2] === 0x05 || bytes[2] === 0x07);
+
+      let pmxTextureBytes: Map<number, { bytes: Uint8Array; mimeType: string }> | undefined;
+      let modelBytes = bytes;
+
+      if (isZip) {
+        try {
+          const extracted = extractPmxZip(bytes);
+          modelBytes = extracted.pmxBytes;
+          pmxTextureBytes = extracted.textureBytes;
+        } catch (e) {
+          set.status = 422;
+          return { error: "zip_extraction_failed", detail: e instanceof Error ? e.message : String(e) };
+        }
+      }
+
+      const kind = sniffKind(modelBytes);
       if (kind === "fbx") {
         set.status = 415;
         return { error: "fbx_not_supported", detail: "FBX upload needs conversion to glTF first. Export your rig as VRM or GLB and re-upload." };
       }
       if (kind === "unknown") {
         set.status = 415;
-        return { error: "unsupported_format", detail: "Upload a VRM, GLB, or PMX humanoid." };
+        return { error: "unsupported_format", detail: "Upload a VRM, GLB, PMX, or a zip containing a PMX + textures." };
       }
 
       let result;
       try {
-        result = kind === "pmx" ? pmxToSka(bytes, { name: body.name }) : vrmOrGlbToSka(bytes, { name: body.name });
+        result = kind === "pmx"
+          ? pmxToSka(modelBytes, { name: body.name }, pmxTextureBytes)
+          : vrmOrGlbToSka(modelBytes, { name: body.name });
       } catch (e) {
         set.status = 422;
         return { error: "conversion_failed", detail: e instanceof Error ? e.message : String(e) };
@@ -166,14 +249,26 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
       const key = skaKeyFor(hash);
       await putBytes(key, result.ska, "application/octet-stream");
 
-      // Extract and store the VRM/GLB thumbnail image if present.
+      // Thumbnail: prefer user-uploaded thumbnail, then fall back to VRM/GLB embedded thumbnail.
       let thumbnailKey: string | null = null;
-      const thumb = extractThumbnail(bytes);
-      if (thumb) {
-        const thumbHash = await sha256Hex(thumb.bytes);
-        const ext = thumb.mimeType === "image/jpeg" ? "jpg" : "png";
-        thumbnailKey = `av/thumb/${thumbHash.slice(0, 2)}/${thumbHash}.${ext}`;
-        await putBytes(thumbnailKey, thumb.bytes, thumb.mimeType);
+      const thumbFile = body.thumbnail as File | undefined;
+      if (thumbFile) {
+        const thumbBytes = new Uint8Array(await thumbFile.arrayBuffer());
+        if (thumbBytes.length > MAX_THUMBNAIL_BYTES) {
+          set.status = 413; return { error: "thumbnail_too_large", maxBytes: MAX_THUMBNAIL_BYTES };
+        }
+        const thumbHash = await sha256Hex(thumbBytes);
+        const thumbExt = (thumbFile.type === "image/jpeg" ? "jpg" : "png");
+        thumbnailKey = `av/thumb/${thumbHash.slice(0, 2)}/${thumbHash}.${thumbExt}`;
+        await putBytes(thumbnailKey, thumbBytes, thumbFile.type || "image/png");
+      } else {
+        const thumb = extractThumbnail(modelBytes);
+        if (thumb) {
+          const thumbHash = await sha256Hex(thumb.bytes);
+          const ext = thumb.mimeType === "image/jpeg" ? "jpg" : "png";
+          thumbnailKey = `av/thumb/${thumbHash.slice(0, 2)}/${thumbHash}.${ext}`;
+          await putBytes(thumbnailKey, thumb.bytes, thumb.mimeType);
+        }
       }
 
       const avatar = await prisma.avatar.create({
@@ -207,7 +302,7 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
 
       return { avatar: serialize(avatar) };
     },
-    { body: t.Object({ file: t.File(), name: t.Optional(t.String()) }) },
+    { body: t.Object({ file: t.File(), name: t.Optional(t.String()), thumbnail: t.Optional(t.File()) }) },
   )
 
   // Set the caller's currently-worn avatar.
@@ -235,6 +330,60 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
       return { ok: true };
     },
     { params: t.Object({ id: t.String() }), body: t.Object({ status: t.Integer({ minimum: 0, maximum: 2 }) }) },
+  )
+
+  // Rename one of the caller's own avatars.
+  .post(
+    "/:id/rename",
+    async ({ params, body, session, set }) => {
+      const a = await prisma.avatar.findUnique({ where: { id: params.id } });
+      if (!a || a.authorId !== session.sub) { set.status = 404; return { error: "not_found" }; }
+      const newName = (body.name ?? "").trim();
+      if (!newName) { set.status = 400; return { error: "empty_name" }; }
+      if (newName.length > 80) { set.status = 400; return { error: "name_too_long" }; }
+      await prisma.avatar.update({ where: { id: params.id }, data: { name: newName } });
+      return { ok: true, name: newName };
+    },
+    { params: t.Object({ id: t.String() }), body: t.Object({ name: t.String() }) },
+  )
+
+  // Update thumbnail for one of the caller's own avatars.
+  .post(
+    "/:id/thumbnail",
+    async ({ params, body, session, set }) => {
+      const a = await prisma.avatar.findUnique({ where: { id: params.id } });
+      if (!a || a.authorId !== session.sub) { set.status = 404; return { error: "not_found" }; }
+      const thumbFile = body.thumbnail as File;
+      if (!thumbFile) { set.status = 400; return { error: "missing_thumbnail" }; }
+      const thumbBytes = new Uint8Array(await thumbFile.arrayBuffer());
+      if (thumbBytes.length > MAX_THUMBNAIL_BYTES) { set.status = 413; return { error: "thumbnail_too_large", maxBytes: MAX_THUMBNAIL_BYTES }; }
+      const thumbHash = await sha256Hex(thumbBytes);
+      const thumbExt = (thumbFile.type === "image/jpeg" ? "jpg" : "png");
+      const thumbnailKey = `av/thumb/${thumbHash.slice(0, 2)}/${thumbHash}.${thumbExt}`;
+      await putBytes(thumbnailKey, thumbBytes, thumbFile.type || "image/png");
+      await prisma.avatar.update({ where: { id: params.id }, data: { thumbnailKey } });
+      return { ok: true, thumbnailUrl: assetPublicUrl(thumbnailKey) };
+    },
+    { params: t.Object({ id: t.String() }), body: t.Object({ thumbnail: t.File() }) },
+  )
+
+  // Delete one of the caller's own avatars (and its stored files).
+  .delete(
+    "/:id",
+    async ({ params, session, set }) => {
+      const a = await prisma.avatar.findUnique({ where: { id: params.id }, include: { versions: true } });
+      if (!a || a.authorId !== session.sub) { set.status = 404; return { error: "not_found" }; }
+      if (a.isBuiltin) { set.status = 403; return { error: "cannot_delete_builtin" }; }
+      // Clear currentAvatarId if it points to this avatar
+      await prisma.user.updateMany({
+        where: { currentAvatarId: params.id },
+        data: { currentAvatarId: null },
+      });
+      await prisma.avatarVersion.deleteMany({ where: { avatarId: params.id } });
+      await prisma.avatar.delete({ where: { id: params.id } });
+      return { ok: true };
+    },
+    { params: t.Object({ id: t.String() }) },
   );
 
 // ── Admin: manage default outfits and the default Home world ───────────────────────────────

@@ -16,6 +16,7 @@
     "@elysiajs/cors": "^1.1.1",
     "@prisma/client": "^6.1.0",
     "elysia": "^1.1.26",
+    "fflate": "^0.8.3",
     "ioredis": "^5.4.1",
     "jose": "^5.9.6"
   },

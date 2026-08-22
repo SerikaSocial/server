@@ -141,7 +141,8 @@ const round3 = (n: number) => Math.round(n * 1000) / 1000;
 /// Extract the embedded thumbnail image from a VRM/GLB file.
 /// VRM 0.x: `extensions.VRM.meta.texture` → index into `textures` → `.source` → `images`.
 /// VRM 1.0: `extensions.VRMC_vrm.meta.thumbnailImage` → index into `images`.
-/// Returns the raw image bytes + mime type, or null if no thumbnail is present.
+/// Fallback: looks for an image named "Thumbnail", then the first image in the GLB.
+/// Returns the raw image bytes + mime type, or null if no suitable image is present.
 export function extractThumbnail(glbBytes: Uint8Array): { bytes: Uint8Array; mimeType: string } | null {
   try {
     const gltf = readGlbJson(glbBytes);
@@ -161,6 +162,21 @@ export function extractThumbnail(glbBytes: Uint8Array): { bytes: Uint8Array; mim
       const texIdx = ext.VRM.meta.texture;
       const tex = textures[texIdx];
       if (tex?.source != null) imageIdx = tex.source;
+    }
+
+    // Fallback 1: look for an image named "Thumbnail" (case-insensitive)
+    if (imageIdx == null) {
+      for (let i = 0; i < images.length; i++) {
+        const name = (images[i]?.name ?? "").toLowerCase();
+        if (name === "thumbnail") { imageIdx = i; break; }
+      }
+    }
+
+    // Fallback 2: first image in the GLB that has a bufferView
+    if (imageIdx == null) {
+      for (let i = 0; i < images.length; i++) {
+        if (images[i]?.bufferView != null) { imageIdx = i; break; }
+      }
     }
 
     if (imageIdx == null) return null;
@@ -234,9 +250,11 @@ export function vrmOrGlbToSka(
 
 /// Convert a PMX (Miku Miku Dance) file to `.ska`. Parses the PMX, converts to GLB,
 /// extracts humanoid bone mapping from MMD bone names, and packages into .ska.
+/// `textureBytes` maps texture index → { bytes, mimeType } for external texture files.
 export function pmxToSka(
   bytes: Uint8Array,
   overrides: { name?: string; author?: string } = {},
+  textureBytes?: Map<number, { bytes: Uint8Array; mimeType: string }>,
 ): ConvertResult {
   const model = parsePMX(bytes);
   const humanoid = extractPMXHumanoid(model);
@@ -244,7 +262,7 @@ export function pmxToSka(
     throw new Error("no 'head' bone found — the PMX model must have a humanoid skeleton with standard MMD bone names (頭/Head, 首/Neck, etc.)");
   }
 
-  const { glb } = pmxToGlb(model);
+  const { glb } = pmxToGlb(model, textureBytes);
   const headY = findHeadY(model, humanoid);
   const name = overrides.name || model.name || model.nameEn || "Untitled Avatar";
   const author = overrides.author || "unknown";
