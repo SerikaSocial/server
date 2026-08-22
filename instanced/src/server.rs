@@ -105,6 +105,7 @@ impl Server {
             MsgType::Hello => self.handle_hello(payload, from).await?,
             MsgType::Pose => self.handle_frame(MsgType::Pose, payload, from, validate_pose).await,
             MsgType::Voice => self.handle_frame(MsgType::Voice, payload, from, validate_voice).await,
+            MsgType::Chat => self.handle_chat(payload, from).await,
             MsgType::Ping => {
                 if let Some(p) = self.peers.get_mut(&from) {
                     p.last_seen = Instant::now();
@@ -283,6 +284,21 @@ impl Server {
                 }
             }
         }
+    }
+
+    /// World text chat: re-frame `[text]` as `[Chat][sender_id][text]` and fan out to the whole
+    /// instance (no AOI — everyone in the room sees chat). The sender is excluded because clients
+    /// echo their own line locally. Text is capped and must be valid UTF-8; bad input is dropped.
+    async fn handle_chat(&mut self, payload: &[u8], from: SocketAddr) {
+        const MAX_CHAT_BYTES: usize = 400;
+        let Some(peer) = self.peers.get_mut(&from) else { return };
+        peer.last_seen = Instant::now();
+        if payload.is_empty() || payload.len() > MAX_CHAT_BYTES || std::str::from_utf8(payload).is_err() {
+            return;
+        }
+        let (peer_id, instance_id) = (peer.peer_id, peer.instance_id.clone());
+        let out = write_relayed(MsgType::Chat, peer_id, payload);
+        self.broadcast(&instance_id, &out, Some(from)).await;
     }
 
     /// Send `msg` to everyone in the instance, optionally excluding one address.

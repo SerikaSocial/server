@@ -1,6 +1,8 @@
 import { S3Client, HeadObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
 // S3-compatible object storage. The plan's default backend is Backblaze B2 (already used by
 // serika-accounts); this code is backend-agnostic, so Cloudflare R2 or plain S3 work by
@@ -69,4 +71,35 @@ export async function deleteObject(key: string): Promise<void> {
 /// Public CDN URL for a content-addressed key. Immutable, so cacheable forever.
 export function cdnUrl(key: string): string {
   return cdnBase ? `${cdnBase.replace(/\/$/, "")}/${key}` : key;
+}
+
+// ── Server-side upload (used by the avatar converter) ────────────────────────────────────
+//
+// Avatars are small enough (a few MB) to stream through the API, unlike 200MB worlds. When S3
+// is configured we PUT to the bucket; otherwise we fall back to a local directory so the whole
+// upload→convert→serve flow works in dev without B2. `assetPublicUrl` returns whichever URL
+// actually serves the bytes.
+
+const localAssetDir = process.env.LOCAL_ASSET_DIR ?? join(process.cwd(), "data", "assets");
+
+export function localAssetPath(key: string): string {
+  return join(localAssetDir, key);
+}
+
+/// Store bytes at `key`. Uses S3 when configured, else writes under LOCAL_ASSET_DIR.
+export async function putBytes(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
+  if (client) {
+    await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: bytes, ContentType: contentType }));
+    return;
+  }
+  const path = localAssetPath(key);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, bytes);
+}
+
+/// The URL that will actually serve `key`: the CDN if configured, else the API's local-file route.
+export function assetPublicUrl(key: string): string {
+  if (cdnBase) return cdnUrl(key);
+  const apiBase = (process.env.PUBLIC_API_URL ?? "").replace(/\/$/, "");
+  return `${apiBase}/v1/assets/file/${key}`;
 }

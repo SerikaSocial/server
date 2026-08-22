@@ -30,4 +30,17 @@ export const config = {
   },
 
   webBaseUrl: process.env.WEB_BASE_URL ?? "http://localhost:3000",
+
+  // WebRTC ICE for P2P instances (M6). Ported from serika-cord: STUN always, plus TURN which is
+  // required for the common symmetric-NAT case. Two ways to supply TURN, Worker taking priority:
+  //  1. Self-hosted coturn — TURN_URL / TURN_USERNAME / TURN_PASSWORD.
+  //  2. A Cloudflare Realtime TURN Worker — TURN_WORKER_URL mints short-lived creds per join and
+  //     returns { iceServers: [...] } which we pass straight through.
+  rtc: {
+    turnWorkerUrl: process.env.TURN_WORKER_URL ?? "",
+    turnUrl: process.env.TURN_URL ?? "",
+    turnUsername: process.env.TURN_USERNAME ?? "",
+    turnPassword: process.env.TURN_PASSWORD ?? "",
+    stunUrls: process.env.STUN_URLS ?? "stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302",
+  },
 } as const;

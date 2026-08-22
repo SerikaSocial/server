@@ -32,6 +32,9 @@ pub enum MsgType {
     Ping = 0x07,
     /// server→client: `[reason_len: u8][reason]` — ticket rejected, instance full, etc.
     Reject = 0x08,
+    /// client→server: `[utf8 text]` · server→client: `[peer_id: u32][utf8 text]`
+    /// A world text-chat line. Fanned out to the whole instance (no AOI) like a control message.
+    Chat = 0x09,
 }
 
 impl MsgType {
@@ -45,6 +48,7 @@ impl MsgType {
             0x06 => Self::Voice,
             0x07 => Self::Ping,
             0x08 => Self::Reject,
+            0x09 => Self::Chat,
             _ => return None,
         })
     }

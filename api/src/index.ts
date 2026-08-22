@@ -8,6 +8,8 @@ import { worldRoutes } from "./routes/worlds.ts";
 import { instanceRoutes } from "./routes/instances.ts";
 import { assetRoutes } from "./routes/assets.ts";
 import { friendRoutes } from "./routes/social.ts";
+import { avatarPublicRoutes, assetFileRoutes, avatarRoutes, adminRoutes } from "./routes/avatars.ts";
+import { rtcRoutes } from "./routes/rtc.ts";
 
 const app = new Elysia()
   .use(cors())
@@ -25,9 +27,14 @@ const app = new Elysia()
   .use(instanceRoutes)
   .use(assetRoutes)
   .use(friendRoutes)
+  .use(avatarPublicRoutes)
+  .use(assetFileRoutes)
+  .use(avatarRoutes)
+  .use(adminRoutes)
+  .use(rtcRoutes)
   .onError(({ code, error, set }) => {
     // Elysia surfaces our thrown auth errors here; keep 401s as 401s, everything else 500.
-    if (set.status === 401) return { error: String(error instanceof Error ? error.message : error) };
+    if (set.status === 401 || set.status === 403) return { error: String(error instanceof Error ? error.message : error) };
     if (code === "VALIDATION") {
       set.status = 400;
       return { error: "validation", detail: String(error instanceof Error ? error.message : error) };

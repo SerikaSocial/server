@@ -78,6 +78,8 @@ model World {
   forceDedicated     Boolean  @default(false) @map("force_dedicated")
   /// True for the shipped starter world — cannot be deleted, always joinable.
   isBuiltin          Boolean  @default(false) @map("is_builtin")
+  /// The world new players land in as their personal Home (admin-selectable, single default).
+  isDefaultHome      Boolean  @default(false) @map("is_default_home")
   publishedVersionId String?  @map("published_version_id") @db.Uuid
   visitCount         BigInt   @default(0) @map("visit_count")
   /// Decayed popularity for the browser sort.
@@ -134,6 +136,9 @@ model Avatar {
   /// 0=builtin 1=vrm 2=gltf 3=fbx
   sourceFormat       Int      @default(0) @map("source_format")
   isBuiltin          Boolean  @default(false) @map("is_builtin")
+  /// Offered to everyone as a selectable default outfit (admin-curated). Suisei is the first.
+  isDefaultOutfit    Boolean  @default(false) @map("is_default_outfit")
+  thumbnailKey       String?  @map("thumbnail_key")
   publishedVersionId String?  @map("published_version_id") @db.Uuid
   createdAt          DateTime @default(now()) @map("created_at")
 

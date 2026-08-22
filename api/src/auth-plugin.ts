@@ -1,5 +1,6 @@
 import { Elysia } from "elysia";
 import { verifySession, type SessionClaims } from "./tokens.ts";
+import { prisma } from "./db.ts";
 
 /// Elysia plugin that resolves the caller from a Bearer session token and 401s if absent
 /// or invalid. Routes that need a user apply `.use(authed)` and read `session` from context.
@@ -20,5 +21,19 @@ export const authed = new Elysia({ name: "authed" }).derive(
       set.status = 401;
       throw new Error("invalid session token");
     }
+  },
+);
+
+/// Like `authed`, but additionally requires the caller to be an admin (users.is_admin). Used to
+/// guard the admin panel routes (managing default avatars and the default Home world).
+export const adminOnly = new Elysia({ name: "adminOnly" }).use(authed).derive(
+  { as: "scoped" },
+  async ({ session, set }): Promise<{ admin: SessionClaims }> => {
+    const user = await prisma.user.findUnique({ where: { id: session.sub }, select: { isAdmin: true } });
+    if (!user?.isAdmin) {
+      set.status = 403;
+      throw new Error("admin only");
+    }
+    return { admin: session };
   },
 );

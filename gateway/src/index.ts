@@ -23,6 +23,28 @@ interface Claims { sub: string; username: string }
 // userId -> set of live sockets (a user may be in the web app and the game at once).
 const sockets = new Map<string, Set<any>>();
 
+// WebRTC signalling rooms for P2P instances: instanceId -> set of member userIds. The gateway is
+// only the signalling channel (offer/answer/ICE candidate exchange); once peers connect, game
+// traffic flows directly over their data channels, never through here.
+const rtcRooms = new Map<string, Set<string>>();
+
+// Send a JSON object to every live socket of a user.
+function sendToUser(userId: string, obj: unknown): void {
+  const conns = sockets.get(userId);
+  if (!conns) return;
+  const s = JSON.stringify(obj);
+  for (const ws of conns) ws.send(s);
+}
+
+// Remove a user from a signalling room and tell the remaining peers.
+function rtcLeave(instanceId: string, userId: string): void {
+  const room = rtcRooms.get(instanceId);
+  if (!room || !room.has(userId)) return;
+  room.delete(userId);
+  for (const other of room) sendToUser(other, { type: "rtc:peer-leave", instanceId, peer: userId });
+  if (room.size === 0) rtcRooms.delete(instanceId);
+}
+
 async function verify(token: string): Promise<Claims | null> {
   try {
     const { payload } = await jwtVerify(token, SESSION_SECRET, { issuer: "serika-social" });
@@ -137,6 +159,33 @@ const app = new Elysia()
           }
           break;
         }
+
+        // ── WebRTC signalling (P2P instances) ─────────────────────────────────────────
+        case "rtc:join": {
+          // Enter an instance's signalling room. The reply lists existing peers so the joiner
+          // knows whom to send offers to (initiator = the newcomer, to keep offers one-directional).
+          const instanceId: string = msg.instanceId;
+          if (!instanceId) break;
+          let room = rtcRooms.get(instanceId);
+          if (!room) { room = new Set(); rtcRooms.set(instanceId, room); }
+          const existing = [...room].filter((u) => u !== userId);
+          room.add(userId);
+          ws.send(JSON.stringify({ type: "rtc:peers", instanceId, peers: existing }));
+          for (const other of existing) sendToUser(other, { type: "rtc:peer-join", instanceId, peer: userId });
+          break;
+        }
+        case "rtc:signal": {
+          // Relay an SDP offer/answer or ICE candidate to a specific peer in the room.
+          const { instanceId, to, data } = msg;
+          const room = rtcRooms.get(instanceId);
+          if (!instanceId || !to || !room || !room.has(userId) || !room.has(to)) break;
+          sendToUser(to, { type: "rtc:signal", instanceId, from: userId, data });
+          break;
+        }
+        case "rtc:leave": {
+          if (msg.instanceId) rtcLeave(msg.instanceId, userId);
+          break;
+        }
       }
     },
 
@@ -145,10 +194,11 @@ const app = new Elysia()
       if (!userId) return;
       const set = sockets.get(userId);
       set?.delete(ws);
-      // Only mark offline once the user's LAST socket goes away.
+      // Only mark offline (and drop from signalling rooms) once the user's LAST socket goes away.
       if (set && set.size === 0) {
         sockets.delete(userId);
         await redis.srem("online:users", userId);
+        for (const instanceId of [...rtcRooms.keys()]) rtcLeave(instanceId, userId);
       }
     },
   })
