@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { authed, adminOnly } from "../auth-plugin.ts";
 import { prisma } from "../db.ts";
 import { putBytes, assetPublicUrl, localAssetPath, getObjectBytes } from "../storage.ts";
-import { vrmOrGlbToSka, sniffKind } from "../ska.ts";
+import { vrmOrGlbToSka, pmxToSka, sniffKind, extractThumbnail } from "../ska.ts";
 
 // Avatar catalogue + upload → `.ska` conversion.
 //
@@ -18,12 +18,12 @@ function skaKeyFor(hashHex: string): string {
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Source-format code stored on Avatar.sourceFormat: 0=builtin 1=vrm 2=gltf 3=fbx
-const formatCode = (src: string): number => (src === "vrm0" || src === "vrm1" ? 1 : src === "glb" ? 2 : 0);
+// Source-format code stored on Avatar.sourceFormat: 0=builtin 1=vrm 2=gltf 3=fbx 4=pmx
+const formatCode = (src: string): number => (src === "vrm0" || src === "vrm1" ? 1 : src === "glb" ? 2 : src === "pmx" ? 4 : 0);
 
 /// Shape a DB avatar row (with its published version) into the API's public JSON.
 function serialize(a: any) {
@@ -151,12 +151,12 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
       }
       if (kind === "unknown") {
         set.status = 415;
-        return { error: "unsupported_format", detail: "Upload a VRM or a binary glTF (.glb) humanoid." };
+        return { error: "unsupported_format", detail: "Upload a VRM, GLB, or PMX humanoid." };
       }
 
       let result;
       try {
-        result = vrmOrGlbToSka(bytes, { name: body.name });
+        result = kind === "pmx" ? pmxToSka(bytes, { name: body.name }) : vrmOrGlbToSka(bytes, { name: body.name });
       } catch (e) {
         set.status = 422;
         return { error: "conversion_failed", detail: e instanceof Error ? e.message : String(e) };
@@ -166,12 +166,23 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
       const key = skaKeyFor(hash);
       await putBytes(key, result.ska, "application/octet-stream");
 
+      // Extract and store the VRM/GLB thumbnail image if present.
+      let thumbnailKey: string | null = null;
+      const thumb = extractThumbnail(bytes);
+      if (thumb) {
+        const thumbHash = await sha256Hex(thumb.bytes);
+        const ext = thumb.mimeType === "image/jpeg" ? "jpg" : "png";
+        thumbnailKey = `av/thumb/${thumbHash.slice(0, 2)}/${thumbHash}.${ext}`;
+        await putBytes(thumbnailKey, thumb.bytes, thumb.mimeType);
+      }
+
       const avatar = await prisma.avatar.create({
         data: {
           authorId: session.sub,
           name: result.meta.name,
           sourceFormat: formatCode(result.meta.sourceFormat),
           releaseStatus: 0, // private until the author publishes
+          thumbnailKey,
           versions: {
             create: {
               version: 1,

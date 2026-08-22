@@ -3,6 +3,9 @@
 // the Bun API on the upload path. The `.ska` byte layout is documented in tools/ska/ska_format.md
 // and parsed byte-identically by the Godot client (game/Avatar/SkaFile.cs).
 
+import { parsePMX, extractPMXHumanoid, findHeadY } from "./pmx.ts";
+import { pmxToGlb } from "./pmx_to_glb.ts";
+
 const GLB_MAGIC = 0x46546c67; // "glTF" little-endian
 const JSON_CHUNK = 0x4e4f534a; // "JSON"
 
@@ -27,21 +30,26 @@ const KNOWN_ROLES = new Set([
 export interface SkaMeta {
   name: string;
   author: string;
-  sourceFormat: "vrm0" | "vrm1" | "glb";
+  sourceFormat: "vrm0" | "vrm1" | "glb" | "pmx";
   faceYawDegrees: number;
   heightMeters: number;
   eyeHeightMeters: number;
   humanoid: Record<string, string>;
 }
 
-export type UploadKind = "vrm" | "glb" | "fbx" | "unknown";
+export type UploadKind = "vrm" | "glb" | "fbx" | "pmx" | "unknown";
 
 /// Sniff the uploaded bytes. FBX has a distinctive ASCII header; VRM/GLB share the glTF magic
-/// (we tell them apart by the VRM extension after parsing JSON).
+/// (we tell them apart by the VRM extension after parsing JSON). PMX starts with "PMX ".
 export function sniffKind(bytes: Uint8Array): UploadKind {
   if (bytes.length >= 4) {
     const magic = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
     if (magic === GLB_MAGIC) return "glb"; // may be VRM; refined during parse
+  }
+  // PMX magic: "PMX " in ASCII
+  if (bytes.length >= 4) {
+    const head = new TextDecoder("ascii").decode(bytes.subarray(0, 4));
+    if (head === "PMX ") return "pmx";
   }
   // Binary FBX starts with "Kaydara FBX Binary  ".
   const head = new TextDecoder("latin1").decode(bytes.subarray(0, 20));
@@ -130,6 +138,54 @@ function measure(gltf: any, humanoid: Record<string, string>): { height: number;
 
 const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
+/// Extract the embedded thumbnail image from a VRM/GLB file.
+/// VRM 0.x: `extensions.VRM.meta.texture` → index into `textures` → `.source` → `images`.
+/// VRM 1.0: `extensions.VRMC_vrm.meta.thumbnailImage` → index into `images`.
+/// Returns the raw image bytes + mime type, or null if no thumbnail is present.
+export function extractThumbnail(glbBytes: Uint8Array): { bytes: Uint8Array; mimeType: string } | null {
+  try {
+    const gltf = readGlbJson(glbBytes);
+    const ext = gltf.extensions ?? {};
+    const images = gltf.images ?? [];
+    const textures = gltf.textures ?? [];
+    const bufferViews = gltf.bufferViews ?? [];
+
+    let imageIdx: number | undefined;
+
+    // VRM 1.0: meta.thumbnailImage is a direct index into images
+    if (ext.VRMC_vrm?.meta?.thumbnailImage != null) {
+      imageIdx = ext.VRMC_vrm.meta.thumbnailImage;
+    }
+    // VRM 0.x: meta.texture is an index into textures, then .source gives the image
+    else if (ext.VRM?.meta?.texture != null) {
+      const texIdx = ext.VRM.meta.texture;
+      const tex = textures[texIdx];
+      if (tex?.source != null) imageIdx = tex.source;
+    }
+
+    if (imageIdx == null) return null;
+
+    const image = images[imageIdx];
+    if (!image || image.bufferView == null) return null;
+
+    const bv = bufferViews[image.bufferView];
+    if (!bv) return null;
+
+    // Binary chunk starts after: 12 (header) + 8 (chunk0 header) + jsonChunkLen + 8 (chunk1 header)
+    const dv = new DataView(glbBytes.buffer, glbBytes.byteOffset, glbBytes.byteLength);
+    const jsonChunkLen = dv.getUint32(12, true);
+    const binOffset = 20 + jsonChunkLen + 8;
+    const start = binOffset + (bv.byteOffset ?? 0);
+    const end = start + bv.byteLength;
+    const bytes = glbBytes.subarray(start, end);
+
+    const mimeType = image.mimeType ?? "image/png";
+    return { bytes, mimeType };
+  } catch {
+    return null;
+  }
+}
+
 /// Wrap a GLB payload + meta into the `.ska` container. Returns a Buffer.
 export function buildSka(glb: Uint8Array, meta: SkaMeta): Buffer {
   const metaBytes = Buffer.from(JSON.stringify(meta), "utf-8");
@@ -174,4 +230,33 @@ export function vrmOrGlbToSka(
     heightMeters: height, eyeHeightMeters: eye, humanoid,
   };
   return { ska: buildSka(bytes, meta), meta };
+}
+
+/// Convert a PMX (Miku Miku Dance) file to `.ska`. Parses the PMX, converts to GLB,
+/// extracts humanoid bone mapping from MMD bone names, and packages into .ska.
+export function pmxToSka(
+  bytes: Uint8Array,
+  overrides: { name?: string; author?: string } = {},
+): ConvertResult {
+  const model = parsePMX(bytes);
+  const humanoid = extractPMXHumanoid(model);
+  if (!humanoid.head) {
+    throw new Error("no 'head' bone found — the PMX model must have a humanoid skeleton with standard MMD bone names (頭/Head, 首/Neck, etc.)");
+  }
+
+  const { glb } = pmxToGlb(model);
+  const headY = findHeadY(model, humanoid);
+  const name = overrides.name || model.name || model.nameEn || "Untitled Avatar";
+  const author = overrides.author || "unknown";
+
+  const meta: SkaMeta = {
+    name,
+    author,
+    sourceFormat: "pmx",
+    faceYawDegrees: 180, // MMD models typically face +Z like VRM 0.x
+    heightMeters: round3(headY + 0.18),
+    eyeHeightMeters: round3(headY + 0.08),
+    humanoid,
+  };
+  return { ska: buildSka(glb, meta), meta };
 }
