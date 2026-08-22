@@ -1,5 +1,6 @@
 import { Elysia, t } from "elysia";
 import { prisma } from "../db.ts";
+import { assetPublicUrl } from "../storage.ts";
 
 export const worldRoutes = new Elysia({ prefix: "/v1/worlds" })
   // Public browse. Ordered by heat; only community/public worlds plus built-ins.
@@ -11,14 +12,24 @@ export const worldRoutes = new Elysia({ prefix: "/v1/worlds" })
         where: { OR: [{ releaseStatus: { gte: 1 } }, { isBuiltin: true }] },
         orderBy: [{ heat: "desc" }, { visitCount: "desc" }],
         take,
+        include: {
+          author: { select: { username: true } },
+          versions: { where: { buildStatus: 2 }, orderBy: { version: "desc" }, take: 1, include: { assets: true } },
+        },
       });
-      return worlds.map(serializeWorld);
+      return worlds.map((w) => serializeWorld(w));
     },
     { query: t.Object({ limit: t.Optional(t.String()) }) },
   )
 
   .get("/:id", async ({ params, set }) => {
-    const world = await prisma.world.findUnique({ where: { id: params.id } });
+    const world = await prisma.world.findUnique({
+      where: { id: params.id },
+      include: {
+        author: { select: { username: true } },
+        versions: { where: { buildStatus: 2 }, orderBy: { version: "desc" }, take: 1, include: { assets: true } },
+      },
+    });
     if (!world) {
       set.status = 404;
       return { error: "not_found" };
@@ -41,10 +52,11 @@ export const worldRoutes = new Elysia({ prefix: "/v1/worlds" })
     };
   });
 
-function serializeWorld(w: {
-  id: string; name: string; description: string; tags: string[];
-  capacity: number; releaseStatus: number; isBuiltin: boolean; visitCount: bigint; heat: number;
-}) {
+function serializeWorld(w: any) {
+  const latestVersion = w.versions?.[0];
+  const platformAsset = latestVersion?.assets?.find((a: any) =>
+    a.platform === (process.platform === "win32" ? 0 : process.platform === "linux" ? 1 : 2)
+  ) ?? latestVersion?.assets?.[0];
   return {
     id: w.id,
     name: w.name,
@@ -55,5 +67,8 @@ function serializeWorld(w: {
     isBuiltin: w.isBuiltin,
     visitCount: Number(w.visitCount),
     heat: w.heat,
+    author: w.author?.username ?? null,
+    downloadUrl: platformAsset?.cdnKey ? assetPublicUrl(platformAsset.cdnKey) : null,
+    thumbnailUrl: null,
   };
 }
