@@ -82,7 +82,7 @@ export async function loginWithEmail(
   email: string,
   password: string,
 ): Promise<{ access_token: string } | null> {
-  const res = await fetch(`${config.accounts.baseUrl}/login`, {
+  const res = await fetch(`${config.accounts.baseUrl}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password, productId: "serika-social" }),
