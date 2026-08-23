@@ -167,6 +167,76 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
     { params: t.Object({ userId: t.String() }) },
   )
 
+  // List users I've blocked — the client fetches this to show beans for blocked users in-world.
+  .get("/blocks", async ({ session }) => {
+    const blocks = await prisma.block.findMany({
+      where: { userId: session.sub },
+      select: {
+        blocked: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      },
+    });
+    return { blocks: blocks.map((b) => b.blocked) };
+  })
+
+  // ── Follows (Twitter-style, asymmetric) ──────────────────────────────────
+
+  // Follow a user.
+  .post(
+    "/follow/:userId",
+    async ({ session, params, set }) => {
+      if (params.userId === session.sub) {
+        set.status = 400;
+        return { error: "cannot_follow_self" };
+      }
+      const target = await prisma.user.findUnique({ where: { id: params.userId } });
+      if (!target) {
+        set.status = 404;
+        return { error: "user_not_found" };
+      }
+      await prisma.follow.upsert({
+        where: { followerId_followedId: { followerId: session.sub, followedId: params.userId } },
+        create: { followerId: session.sub, followedId: params.userId },
+        update: {},
+      });
+      return { status: "following" };
+    },
+    { params: t.Object({ userId: t.String() }) },
+  )
+
+  // Unfollow a user.
+  .delete(
+    "/follow/:userId",
+    async ({ session, params }) => {
+      await prisma.follow.deleteMany({
+        where: { followerId: session.sub, followedId: params.userId },
+      });
+      return { status: "unfollowed" };
+    },
+    { params: t.Object({ userId: t.String() }) },
+  )
+
+  // List who I'm following.
+  .get("/following", async ({ session }) => {
+    const follows = await prisma.follow.findMany({
+      where: { followerId: session.sub },
+      select: {
+        followed: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      },
+    });
+    return { following: follows.map((f) => f.followed) };
+  })
+
+  // List who follows me.
+  .get("/followers", async ({ session }) => {
+    const follows = await prisma.follow.findMany({
+      where: { followedId: session.sub },
+      select: {
+        follower: { select: { id: true, username: true, displayName: true, avatarUrl: true } },
+      },
+    });
+    return { followers: follows.map((f) => f.follower) };
+  })
+
   // ── User search ──────────────────────────────────────────────────────────
 
   .get(

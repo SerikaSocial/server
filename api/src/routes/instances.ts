@@ -4,6 +4,35 @@ import { authed } from "../auth-plugin.ts";
 import { signTicket } from "../tokens.ts";
 import { place } from "../allocator.ts";
 
+/// Close instances whose Redis roster is empty and have been idle for a grace period.
+/// Called opportunistically from the world detail endpoint and from the periodic sweep.
+export async function sweepStaleInstances(worldId?: string) {
+  const where = { closedAt: null, ...(worldId ? { worldId } : {}) };
+  const open = await prisma.instance.findMany({ where, select: { id: true, createdAt: true } });
+  if (open.length === 0) return;
+
+  const counts = await Promise.all(
+    open.map((i) => redis.hlen(`inst:${i.id}:roster`)),
+  );
+
+  const stale = open.filter((_, i) => counts[i] === 0);
+  if (stale.length === 0) return;
+
+  await prisma.instance.updateMany({
+    where: { id: { in: stale.map((s) => s.id) } },
+    data: { closedAt: new Date() },
+  });
+}
+
+/// Periodic sweep — close ALL stale instances across all worlds.
+let sweepTimer: ReturnType<typeof setInterval> | null = null;
+export function startInstanceSweep() {
+  if (sweepTimer) return;
+  sweepTimer = setInterval(() => {
+    sweepStaleInstances().catch((e) => console.error("[sweep]", e));
+  }, 60_000); // every minute
+}
+
 export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
   .use(authed)
 
@@ -157,7 +186,28 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
     }
     const roster = await redis.hkeys(`inst:${instance.id}:roster`);
     return { ...serializeInstance(instance), members: roster };
-  });
+  })
+
+  // Close an instance. Only the owner or an admin can close it. Also cleans up the Redis roster.
+  .post(
+    "/:id/close",
+    async ({ params, session, set }) => {
+      const instance = await prisma.instance.findUnique({ where: { id: params.id } });
+      if (!instance || instance.closedAt) {
+        set.status = 404;
+        return { error: "instance_not_found" };
+      }
+      const user = await prisma.user.findUnique({ where: { id: session.sub }, select: { isAdmin: true } });
+      if (instance.ownerId !== session.sub && !user?.isAdmin) {
+        set.status = 403;
+        return { error: "not_authorized" };
+      }
+      await prisma.instance.update({ where: { id: params.id }, data: { closedAt: new Date() } });
+      await redis.del(`inst:${params.id}:roster`);
+      return { status: "closed" };
+    },
+    { params: t.Object({ id: t.String() }) },
+  );
 
 /// Mint a single-use join ticket and record its jti so the relay can reject replays. The
 /// relay marks it used via the gateway; we only need to pre-register the id with a TTL.

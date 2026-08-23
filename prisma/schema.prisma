@@ -33,6 +33,10 @@ model User {
   ownedInstances  Instance[] @relation("InstanceOwner")
   friendsA        Friend[]  @relation("FriendA")
   friendsB        Friend[]  @relation("FriendB")
+  following       Follow[]  @relation("Follower")
+  followers       Follow[]  @relation("Followed")
+  blocks          Block[]   @relation("BlockUser")
+  blockedBy       Block[]   @relation("BlockBlocked")
   favorites       Favorite[]
   reviews         Review[]
 
@@ -62,8 +66,25 @@ model Block {
   blockedId String   @map("blocked_id") @db.Uuid
   createdAt DateTime @default(now()) @map("created_at")
 
+  user    User @relation("BlockUser", fields: [userId], references: [id], onDelete: Cascade)
+  blocked User @relation("BlockBlocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
   @@id([userId, blockedId])
   @@map("blocks")
+}
+
+/// Asymmetric follow (Twitter-style): follower → followed. No acceptance needed.
+model Follow {
+  followerId String   @map("follower_id") @db.Uuid
+  followedId String   @map("followed_id") @db.Uuid
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  follower User @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followed User @relation("Followed", fields: [followedId], references: [id], onDelete: Cascade)
+
+  @@id([followerId, followedId])
+  @@index([followedId])
+  @@map("follows")
 }
 
 model World {

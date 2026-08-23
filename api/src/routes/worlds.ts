@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
-import { prisma } from "../db.ts";
+import { prisma, redis } from "../db.ts";
 import { assetPublicUrl } from "../storage.ts";
+import { sweepStaleInstances } from "./instances.ts";
 
 export const worldRoutes = new Elysia({ prefix: "/v1/worlds" })
   // Public browse. Ordered by heat; only community/public worlds plus built-ins.
@@ -34,19 +35,28 @@ export const worldRoutes = new Elysia({ prefix: "/v1/worlds" })
       set.status = 404;
       return { error: "not_found" };
     }
+    // Opportunistically close empty instances before listing.
+    await sweepStaleInstances(world.id);
+
     // Live instance list for this world, straight from the durable table (open instances).
     const instances = await prisma.instance.findMany({
       where: { worldId: world.id, closedAt: null },
       orderBy: { createdAt: "asc" },
     });
+
+    // Fetch live player counts from Redis rosters in parallel.
+    const liveCounts = await Promise.all(
+      instances.map((i) => redis.hlen(`inst:${i.id}:roster`)),
+    );
+
     return {
       ...serializeWorld(world),
-      instances: instances.map((i) => ({
+      instances: instances.map((i, idx) => ({
         id: i.id,
         access: i.access,
         mode: i.mode,
         region: i.region,
-        playerCount: i.playerCount,
+        playerCount: liveCounts[idx] ?? 0,
         capacity: i.capacity,
       })),
     };

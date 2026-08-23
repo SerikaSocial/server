@@ -63,12 +63,16 @@ pub fn write_hello(ticket: &str) -> Vec<u8> {
     out
 }
 
-pub fn write_welcome(your_id: u32, peers: &[(u32, &str)]) -> Vec<u8> {
+/// peers: (peer_id, user_id, username)
+pub fn write_welcome(your_id: u32, peers: &[(u32, &str, &str)]) -> Vec<u8> {
     let mut out = vec![MsgType::Welcome as u8];
     out.extend_from_slice(&your_id.to_le_bytes());
     out.extend_from_slice(&(peers.len() as u16).to_le_bytes());
-    for (id, name) in peers {
+    for (id, uid, name) in peers {
         out.extend_from_slice(&id.to_le_bytes());
+        let u = uid.as_bytes();
+        out.push(u.len().min(255) as u8);
+        out.extend_from_slice(&u[..u.len().min(255)]);
         let n = name.as_bytes();
         out.push(n.len().min(255) as u8);
         out.extend_from_slice(&n[..n.len().min(255)]);
@@ -76,9 +80,12 @@ pub fn write_welcome(your_id: u32, peers: &[(u32, &str)]) -> Vec<u8> {
     out
 }
 
-pub fn write_peer_join(id: u32, name: &str) -> Vec<u8> {
+pub fn write_peer_join(id: u32, user_id: &str, name: &str) -> Vec<u8> {
     let mut out = vec![MsgType::PeerJoin as u8];
     out.extend_from_slice(&id.to_le_bytes());
+    let u = user_id.as_bytes();
+    out.push(u.len().min(255) as u8);
+    out.extend_from_slice(&u[..u.len().min(255)]);
     let n = name.as_bytes();
     out.push(n.len().min(255) as u8);
     out.extend_from_slice(&n[..n.len().min(255)]);

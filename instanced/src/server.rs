@@ -173,7 +173,7 @@ impl Server {
         let _ = self.socket.send_to(&welcome, from).await;
 
         // Tell everyone already here that someone joined.
-        let join_msg = write_peer_join(peer_id, &claims.username);
+        let join_msg = write_peer_join(peer_id, &claims.sub, &claims.username);
         self.broadcast(&claims.instance_id, &join_msg, None).await;
 
         self.by_instance.entry(claims.instance_id.clone()).or_default().push(from);
@@ -190,7 +190,7 @@ impl Server {
 
     /// Build a WELCOME listing every OTHER peer currently in the instance.
     fn build_welcome(&self, your_id: u32, instance_id: &str, from: SocketAddr) -> Vec<u8> {
-        let peers: Vec<(u32, &str)> = self
+        let peers: Vec<(u32, &str, &str)> = self
             .by_instance
             .get(instance_id)
             .map(|addrs| {
@@ -198,7 +198,7 @@ impl Server {
                     .iter()
                     .filter(|a| **a != from)
                     .filter_map(|a| self.peers.get(a))
-                    .map(|p| (p.peer_id, p.username.as_str()))
+                    .map(|p| (p.peer_id, p.user_id.as_str(), p.username.as_str()))
                     .collect()
             })
             .unwrap_or_default();
