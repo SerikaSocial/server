@@ -60,6 +60,73 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
     },
   )
 
+  // VRChat-style default matchmaking: join the first open, public, non-full instance of a
+  // world — or create one if none exists. This is what "join a world" should do; the plain
+  // `POST /` (create) always spins up a *fresh* instance, which is why two players joining
+  // the same world never saw each other (each got their own empty instance).
+  .post(
+    "/join-world",
+    async ({ body, session, set }) => {
+      const world = await prisma.world.findUnique({ where: { id: body.worldId } });
+      if (!world) {
+        set.status = 404;
+        return { error: "world_not_found" };
+      }
+
+      // Prefer an existing open public instance with room; oldest first so everyone funnels
+      // into the same one rather than scattering across half-empty instances.
+      const open = await prisma.instance.findMany({
+        where: { worldId: world.id, closedAt: null, access: 0 },
+        orderBy: { createdAt: "asc" },
+      });
+      let chosen: (typeof open)[number] | null = null;
+      for (const inst of open) {
+        const count = await redis.hlen(`inst:${inst.id}:roster`);
+        if (count < inst.capacity) {
+          chosen = inst;
+          break;
+        }
+      }
+
+      // None joinable → allocate a fresh one.
+      if (!chosen) {
+        const placement = await place({
+          capacity: world.capacity,
+          forceDedicated: world.forceDedicated,
+        });
+        if (!placement) {
+          set.status = 503;
+          return { error: "no_relay_available" };
+        }
+        chosen = await prisma.instance.create({
+          data: {
+            worldId: world.id,
+            worldVersionId: world.publishedVersionId,
+            ownerId: session.sub,
+            access: 0,
+            mode: placement.mode,
+            nodeId: placement.nodeId,
+            endpoint: placement.endpoint,
+            capacity: world.capacity,
+          },
+        });
+      }
+
+      const ticket = await mintTicket(chosen.id, session.sub);
+      if (!ticket) {
+        set.status = 500;
+        return { error: "ticket_failed" };
+      }
+      return {
+        instance: serializeInstance(chosen),
+        endpoint: chosen.endpoint,
+        worldName: world.name,
+        ...ticket,
+      };
+    },
+    { body: t.Object({ worldId: t.String() }) },
+  )
+
   // Join an existing open instance: returns a ticket if there's room.
   .post("/:id/join", async ({ params, session, set }) => {
     const instance = await prisma.instance.findUnique({ where: { id: params.id } });
