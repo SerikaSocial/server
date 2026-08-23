@@ -65,6 +65,10 @@ async function main() {
     update: { name: "Serika (default)" },
   });
 
+  // Look up pikachubolk to attribute authored worlds to them.
+  const pikachubolk = await prisma.user.findFirst({ where: { username: "pikachubolk" } });
+  const authorId = pikachubolk?.id ?? null;
+
   // Default world: the M1 spawn. Ships inside the client, so it needs no CDN asset.
   const world = await prisma.world.upsert({
     where: { id: "00000000-0000-0000-0000-0000000000e0" },
@@ -82,9 +86,46 @@ async function main() {
     update: { name: "The Commons", isDefaultHome: true },
   });
 
+  // ── Community worlds by pikachubolk ─────────────────────────────────────────────
+  // These are genuine public worlds (not builtin) attributed to pikachubolk.
+  // The client renders them by ID via Worlds.BuildWorldForId() — no CDN asset needed.
+
+  const communityWorlds = [
+    { id: "00000000-0000-0000-0000-0000000000e1", name: "Mirror Gallery", description: "A room lined with mirrors on every wall. Check your avatar from every angle. Bright even lighting, central pedestal, eight full-length mirrors.", tags: ["mirror", "social"], capacity: 16, heat: 500 },
+    { id: "00000000-0000-0000-0000-0000000000e2", name: "Serika Home", description: "The cosy Home house as a multiplayer world. Warm fireplace, couch, coffee table, bookshelf, mirror — all the comforts of home, now with friends.", tags: ["home", "social"], capacity: 8, heat: 400 },
+    { id: "00000000-0000-0000-0000-0000000000e3", name: "Cinema", description: "A cinema-style world with a large 12m screen and tiered seating. Dim ambient lighting for that movie theatre vibe. Perfect for watch parties.", tags: ["video", "social", "cinema"], capacity: 32, heat: 300 },
+    { id: "00000000-0000-0000-0000-0000000000e4", name: "Test: Empty Room", description: "Minimal test room — floor, four walls, grid lines. The blank canvas for testing movement, collision, and avatar scaling.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e5", name: "Test: Pillar Maze", description: "A grid of collidable pillars for navigation and pathfinding testing. 7×7 grid with 6m spacing.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e6", name: "Test: Ramps", description: "Platforms at different heights connected by ramps. Tests slope collision, gravity, and jumping.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e7", name: "Test: Color Grid", description: "A floor of 100 differently colored tiles arranged in a 10×10 grid. Tests material rendering and color perception.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e8", name: "Test: Sphere Garden", description: "A scattering of 30 decorative spheres in various sizes and colors, plus three large translucent spheres. Tests sphere collision and transparency.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e9", name: "Backrooms", description: "Yellow wallpaper maze with flickering fluorescent lights and damp carpet. Liminal horror atmosphere. Placeholder geometry — full 3D model coming.", tags: ["maze", "horror", "liminal"], capacity: 16, heat: 200 },
+    { id: "00000000-0000-0000-0000-0000000000ea", name: "Gryffindor Common Room", description: "Warm cozy common room with a roaring fireplace, red and gold decor, squishy sofas, bookshelves, and a winding staircase. Placeholder geometry — full 3D model coming.", tags: ["hogwarts", "social", "cozy"], capacity: 16, heat: 250 },
+  ];
+
+  for (const w of communityWorlds) {
+    await prisma.world.upsert({
+      where: { id: w.id },
+      create: {
+        id: w.id,
+        authorId,
+        name: w.name,
+        description: w.description,
+        tags: w.tags,
+        capacity: w.capacity,
+        releaseStatus: 2,
+        isBuiltin: false,
+        heat: w.heat,
+      },
+      update: { name: w.name, description: w.description, tags: w.tags, authorId, isBuiltin: false },
+    });
+  }
+
   console.log("seeded:");
   console.log(`  avatar ${avatar.id} — ${avatar.name}`);
   console.log(`  world  ${world.id} — ${world.name}`);
+  for (const w of communityWorlds)
+    console.log(`  world  ${w.id} — ${w.name}`);
   await seedSuisei();
   await prisma.$disconnect();
   redis.disconnect();

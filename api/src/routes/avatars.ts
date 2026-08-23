@@ -130,6 +130,31 @@ export const avatarPublicRoutes = new Elysia({ prefix: "/v1/avatars" })
     },
     { query: t.Object({ limit: t.Optional(t.String()) }) },
   )
+  // The avatar a given user is currently wearing. The game calls this when a peer joins an
+  // instance so each remote player renders as themselves — the relay only carries the peer's
+  // user id, not their avatar, and without this every remote wore the local player's model.
+  // Falls back to the newest default outfit so a peer is never a capsule.
+  .get(
+    "/by-user/:userId",
+    async ({ params }) => {
+      const user = await prisma.user.findUnique({
+        where: { id: params.userId },
+        select: { currentAvatarId: true },
+      });
+      let avatar = user?.currentAvatarId
+        ? await prisma.avatar.findUnique({ where: { id: user.currentAvatarId }, include: withVersion })
+        : null;
+      if (!avatar) {
+        avatar = await prisma.avatar.findFirst({
+          where: { isDefaultOutfit: true },
+          include: withVersion,
+          orderBy: { createdAt: "desc" },
+        });
+      }
+      return { avatar: avatar ? serialize(avatar) : null };
+    },
+    { params: t.Object({ userId: t.String() }) },
+  )
   .get("/:id", async ({ params, set }) => {
     const a = await prisma.avatar.findUnique({ where: { id: params.id }, include: withVersion });
     if (!a) { set.status = 404; return { error: "not_found" }; }
