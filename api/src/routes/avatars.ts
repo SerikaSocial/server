@@ -2,7 +2,7 @@ import { Elysia, t } from "elysia";
 import { readFile } from "node:fs/promises";
 import { authed, adminOnly } from "../auth-plugin.ts";
 import { prisma } from "../db.ts";
-import { putBytes, assetPublicUrl, localAssetPath, getObjectBytes } from "../storage.ts";
+import { putBytes, assetPublicUrl, imagePublicUrl, localAssetPath, getObjectBytes } from "../storage.ts";
 import { vrmOrGlbToSka, pmxToSka, sniffKind, extractThumbnail } from "../ska.ts";
 import { parsePMX } from "../pmx.ts";
 import { unzipSync } from "fflate";
@@ -100,7 +100,7 @@ function serialize(a: any) {
     isBuiltin: a.isBuiltin,
     isDefaultOutfit: a.isDefaultOutfit,
     releaseStatus: a.releaseStatus,
-    thumbnailUrl: a.thumbnailKey ? assetPublicUrl(a.thumbnailKey) : null,
+    thumbnailUrl: a.thumbnailKey ? imagePublicUrl(a.thumbnailKey, { w: 512, h: 512 }) : null,
     downloadUrl: version?.cdnKey ? assetPublicUrl(version.cdnKey) : null,
     heightMeters: stats.heightMeters ?? null,
     createdAt: a.createdAt,
@@ -362,7 +362,7 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
       const thumbnailKey = `av/thumb/${thumbHash.slice(0, 2)}/${thumbHash}.${thumbExt}`;
       await putBytes(thumbnailKey, thumbBytes, thumbFile.type || "image/png");
       await prisma.avatar.update({ where: { id: params.id }, data: { thumbnailKey } });
-      return { ok: true, thumbnailUrl: assetPublicUrl(thumbnailKey) };
+      return { ok: true, thumbnailUrl: imagePublicUrl(thumbnailKey, { w: 512, h: 512 }) };
     },
     { params: t.Object({ id: t.String() }), body: t.Object({ thumbnail: t.File() }) },
   )

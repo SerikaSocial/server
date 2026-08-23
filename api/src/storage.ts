@@ -29,7 +29,15 @@ const client = storageConfigured
     })
   : null;
 
+// Object CDN that serves the raw bytes (Backblaze B2 behind cdn-social.ado.ink). Used for
+// ALL file downloads (.ska/.skw) and as the origin the image proxy fetches from.
 export const cdnBase = process.env.CDN_BASE_URL ?? "";
+
+// Optional wsrv.nl image proxy (images.serika.chat) for on-the-fly thumbnail resize/format.
+// It is an IMAGE proxy — it takes `?url=<origin>` and MUST NOT be used as a plain file host
+// (that returned 404 for every .ska/.png and broke thumbnails + avatar equipping). Only
+// thumbnails go through it, always wrapping a real object-CDN URL.
+export const imageProxyBase = process.env.IMAGE_PROXY_URL ?? "";
 
 /// Content-addressed key layout. `blake3` is the lowercase hex digest supplied by the
 /// client (and re-verified by assetd before publish).
@@ -97,11 +105,29 @@ export async function putBytes(key: string, bytes: Uint8Array, contentType: stri
   await writeFile(path, bytes);
 }
 
-/// The URL that will actually serve `key`: the CDN if configured, else the API's local-file route.
+/// The URL that serves the raw bytes of `key` (a FILE — .ska/.skw): the object CDN if
+/// configured, else the API's local-file route. Never the image proxy.
 export function assetPublicUrl(key: string): string {
   if (cdnBase) return cdnUrl(key);
   const apiBase = (process.env.PUBLIC_API_URL ?? "").replace(/\/$/, "");
   return `${apiBase}/v1/assets/file/${key}`;
+}
+
+/// Public URL for an IMAGE asset (thumbnails). Routed through the wsrv image proxy for
+/// resize/format when IMAGE_PROXY_URL is set, otherwise the plain object CDN. wsrv takes
+/// `?url=<origin>` (scheme optional — it fetches over https), so we wrap the real CDN URL.
+export function imagePublicUrl(key: string, opts?: { w?: number; h?: number; fit?: string }): string {
+  const direct = assetPublicUrl(key); // full URL on the object CDN (or local route)
+  if (!imageProxyBase) return direct;
+  const origin = direct.replace(/^https?:\/\//, "");
+  const p = new URLSearchParams();
+  p.set("url", origin);
+  if (opts?.w) p.set("w", String(opts.w));
+  if (opts?.h) p.set("h", String(opts.h));
+  p.set("fit", opts?.fit ?? "cover");
+  p.set("output", "webp");
+  p.set("q", "85");
+  return `${imageProxyBase.replace(/\/$/, "")}/?${p.toString()}`;
 }
 
 /// Fetch object bytes from B2 (or local disk when S3 isn't configured). Used by the
