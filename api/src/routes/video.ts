@@ -311,16 +311,26 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
         if (resolved.headers.Referer) ffArgs.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
         ffArgs.push("-i", track.url);
 
-        // Audio input (if video track has no audio and separate audio track is available)
-        if (!track.hasAudio && resolved.audioUrl) {
+        const hasSeparateAudio = !track.hasAudio && Boolean(resolved.audioUrl);
+        if (hasSeparateAudio && resolved.audioUrl) {
           if (resolved.headers["User-Agent"]) ffArgs.push("-user_agent", resolved.headers["User-Agent"]);
           if (resolved.headers.Referer) ffArgs.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
           ffArgs.push("-i", resolved.audioUrl);
         }
 
+        // Stream mapping
+        if (hasSeparateAudio) {
+          ffArgs.push("-map", "0:v:0", "-map", "1:a:0?");
+        } else {
+          ffArgs.push("-map", "0:v:0", "-map", "0:a:0?");
+        }
+
+        // Video and Audio codec settings for Godot VideoStreamTheora
         ffArgs.push(
-          "-c:v", "libtheora", "-q:v", "5",
-          "-c:a", "libvorbis", "-q:a", "3",
+          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+          "-pix_fmt", "yuv420p",
+          "-c:v", "libtheora", "-q:v", "6",
+          "-c:a", "libvorbis", "-q:a", "4",
           "-shortest",
           "-f", "ogg",
           "pipe:1"
@@ -348,10 +358,6 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
           clearTimeout(timer);
         });
 
-        // Stream the ogv output to the client.
-        set.headers["content-type"] = "video/ogg";
-        set.headers["cache-control"] = "no-cache";
-
         // ReadableStream from ffmpeg stdout.
         const readable = new ReadableStream({
           start(controller) {
@@ -373,7 +379,12 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
           },
         });
 
-        return readable;
+        return new Response(readable, {
+          headers: {
+            "content-type": "video/ogg",
+            "cache-control": "no-cache",
+          },
+        });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         set.status =

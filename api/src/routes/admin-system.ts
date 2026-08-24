@@ -25,8 +25,10 @@ export const adminSystemRoutes = new Elysia({ prefix: "/v1/admin/system" })
     async ({ body }) => {
       if (body.enabled) {
         await redis.set(keys.maintenance, "1");
+        await redis.publish("relay:control", JSON.stringify({ action: "maintenance", enabled: true })).catch(() => {});
       } else {
         await redis.del(keys.maintenance);
+        await redis.publish("relay:control", JSON.stringify({ action: "maintenance", enabled: false })).catch(() => {});
       }
       return { ok: true, enabled: body.enabled };
     },
@@ -40,6 +42,10 @@ export const adminSystemRoutes = new Elysia({ prefix: "/v1/admin/system" })
   .post("/kill-instances", async () => {
     let rosters = 0;
     let presence = 0;
+
+    // Set kill flag in Redis with short TTL and broadcast to all relays
+    await redis.setex("instances:kill", 10, "1").catch(() => {});
+    await redis.publish("relay:control", JSON.stringify({ action: "kill_all" })).catch(() => {});
 
     // Scan and delete all inst:*:roster keys
     let cursor = "0";

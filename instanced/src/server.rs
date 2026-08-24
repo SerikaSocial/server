@@ -76,7 +76,7 @@ impl Server {
 
     pub async fn run(mut self) -> anyhow::Result<()> {
         let mut buf = vec![0u8; 2048];
-        let mut sweep = tokio::time::interval(Duration::from_secs(1));
+        let mut sweep = tokio::time::interval(Duration::from_millis(250));
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
 
         loop {
@@ -365,13 +365,15 @@ impl Server {
     }
 
     async fn sweep_timeouts(&mut self) {
-        // Maintenance mode: if the flag is set in Redis, kick every connected peer.
+        // Maintenance mode or instance kill: if flag is set in Redis, kick every connected peer.
         let maint: Option<String> = self.redis.get("maintenance:enabled").await.ok().flatten();
-        if maint.as_deref() == Some("1") && !self.peers.is_empty() {
-            tracing::warn!("maintenance mode active — kicking {} peers", self.peers.len());
+        let kill: Option<String> = self.redis.get("instances:kill").await.ok().flatten();
+        if (maint.as_deref() == Some("1") || kill.as_deref() == Some("1")) && !self.peers.is_empty() {
+            let reason = if maint.as_deref() == Some("1") { "maintenance mode" } else { "server shutdown" };
+            tracing::warn!("{reason} active — kicking {} peers", self.peers.len());
             let addrs: Vec<SocketAddr> = self.peers.keys().cloned().collect();
             for addr in &addrs {
-                let _ = self.socket.send_to(&write_reject("maintenance mode"), *addr).await;
+                let _ = self.socket.send_to(&write_reject(reason), *addr).await;
             }
             for addr in addrs {
                 self.remove_peer(addr).await;
