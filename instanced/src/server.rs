@@ -106,6 +106,8 @@ impl Server {
             MsgType::Pose => self.handle_frame(MsgType::Pose, payload, from, validate_pose).await,
             MsgType::Voice => self.handle_frame(MsgType::Voice, payload, from, validate_voice).await,
             MsgType::Chat => self.handle_chat(payload, from).await,
+            MsgType::ObjectSync => self.handle_object_sync(payload, from).await,
+            MsgType::PhysGrab => self.handle_phys_grab(payload, from).await,
             MsgType::Ping => {
                 if let Some(p) = self.peers.get_mut(&from) {
                     p.last_seen = Instant::now();
@@ -298,6 +300,56 @@ impl Server {
         }
         let (peer_id, instance_id) = (peer.peer_id, peer.instance_id.clone());
         let out = write_relayed(MsgType::Chat, peer_id, payload);
+        self.broadcast(&instance_id, &out, Some(from)).await;
+    }
+
+    /// Physics object sync: re-frame `[obj_id][transform+vel]` as `[ObjectSync][sender_id][obj_id][transform+vel]`
+    /// and fan out to peers within AOI range of the sender. Ownership is implicit — whoever
+    /// last sent an ObjectSync for a given obj_id owns it. The payload is 44 bytes:
+    /// obj_id(2) + pos(12) + rot(16) + vel(12) + padding(2).
+    async fn handle_object_sync(&mut self, payload: &[u8], from: SocketAddr) {
+        const EXPECTED: usize = 44; // obj_id(2) + 3×f32 pos + 4×f32 rot + 3×f32 vel
+        let Some(peer) = self.peers.get_mut(&from) else { return };
+        peer.last_seen = Instant::now();
+        if payload.len() < EXPECTED { return; }
+        let (peer_id, instance_id, sender_pos) = (peer.peer_id, peer.instance_id.clone(), peer.position);
+        let out = write_relayed(MsgType::ObjectSync, peer_id, payload);
+        // Fan out with AOI culling, same as pose frames.
+        if let Some(addrs) = self.by_instance.get(&instance_id) {
+            for addr in addrs {
+                if *addr == from { continue; }
+                if let Some(dest) = self.peers.get(addr) {
+                    if dist_squared(sender_pos, dest.position) > AOI_RADIUS * AOI_RADIUS {
+                        continue;
+                    }
+                }
+                let _ = self.socket.send_to(&out, *addr).await;
+            }
+        }
+    }
+
+    /// Physics grab: re-frame `[grab_type][target_peer][bone_or_obj_id][pos]` as
+    /// `[PhysGrab][sender_id][grab_type][bone_or_obj_id][pos]` and fan out to everyone in the
+    /// instance. Grabs are infrequent and targeted, so no AOI culling — the target peer must
+    /// receive it even if they're far away.
+    async fn handle_phys_grab(&mut self, payload: &[u8], from: SocketAddr) {
+        // client→server: [grab_type:u8][target_peer:u32][bone_or_obj_id:u16][x:f32][y:f32][z:f32]
+        // server→client: [peer_id:u32][grab_type:u8][bone_or_obj_id:u16][x:f32][y:f32][z:f32]
+        // We strip target_peer (it's only for routing hints) and re-frame with sender_id.
+        const MIN: usize = 1 + 4 + 2 + 12; // grab_type + target_peer + bone_id + pos
+        let Some(peer) = self.peers.get_mut(&from) else { return };
+        peer.last_seen = Instant::now();
+        if payload.len() < MIN { return; }
+        let (peer_id, instance_id) = (peer.peer_id, peer.instance_id.clone());
+        // Re-frame: [PhysGrab][sender_id][grab_type][bone_or_obj_id][x][y][z]
+        let grab_type = payload[0];
+        // Skip target_peer (4 bytes), take bone_or_obj_id + pos
+        let rest = &payload[5..];
+        let mut out = Vec::with_capacity(1 + 4 + rest.len());
+        out.push(MsgType::PhysGrab as u8);
+        out.extend_from_slice(&peer_id.to_le_bytes());
+        out.push(grab_type);
+        out.extend_from_slice(rest);
         self.broadcast(&instance_id, &out, Some(from)).await;
     }
 

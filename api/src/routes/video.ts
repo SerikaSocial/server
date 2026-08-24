@@ -284,4 +284,105 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
       }
     },
     { query: t.Object({ url: t.String() }) },
+  )
+  .get(
+    "/transcode",
+    async ({ query, set, headers }) => {
+      // Transcoding proxy: resolve the URL → pick best track → pipe through ffmpeg →
+      // stream ogv/Theora to the client. This lets the Godot client play YouTube etc.
+      // without a native mp4/webm decoder GDExtension.
+      const url = (query.url ?? "").trim();
+      if (!url) { set.status = 400; return { error: "missing_url" }; }
+
+      const FFMPEG = process.env.FFMPEG_PATH ?? "ffmpeg";
+      const TRANSCODE_TIMEOUT_MS = 120_000;
+
+      try {
+        const resolved = await resolveVideo(url);
+        // Find best video track (preferably <= 720p for fast transcode)
+        const track = resolved.tracks.find(t => (t.height ?? 0) <= 720) ?? resolved.tracks[0];
+        if (!track) { set.status = 422; return { error: "no_playable_streams" }; }
+
+        // Build ffmpeg args: input from the resolved URL (+ audioUrl if separate) → ogv/Theora output to stdout.
+        const ffArgs: string[] = ["-y"];
+
+        // Video input
+        if (resolved.headers["User-Agent"]) ffArgs.push("-user_agent", resolved.headers["User-Agent"]);
+        if (resolved.headers.Referer) ffArgs.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
+        ffArgs.push("-i", track.url);
+
+        // Audio input (if video track has no audio and separate audio track is available)
+        if (!track.hasAudio && resolved.audioUrl) {
+          if (resolved.headers["User-Agent"]) ffArgs.push("-user_agent", resolved.headers["User-Agent"]);
+          if (resolved.headers.Referer) ffArgs.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
+          ffArgs.push("-i", resolved.audioUrl);
+        }
+
+        ffArgs.push(
+          "-c:v", "libtheora", "-q:v", "5",
+          "-c:a", "libvorbis", "-q:a", "3",
+          "-shortest",
+          "-f", "ogg",
+          "pipe:1"
+        );
+
+        const ffEnv: Record<string, string> = { ...process.env as Record<string, string> };
+
+        const ff = spawn(FFMPEG, ffArgs, {
+          stdio: ["ignore", "pipe", "pipe"],
+          env: ffEnv,
+        });
+
+        const timer = setTimeout(() => {
+          ff.kill("SIGKILL");
+        }, TRANSCODE_TIMEOUT_MS);
+
+        ff.on("error", (e) => {
+          clearTimeout(timer);
+          if ((e as any).code === "ENOENT") {
+            set.status = 503;
+          }
+        });
+
+        ff.on("close", () => {
+          clearTimeout(timer);
+        });
+
+        // Stream the ogv output to the client.
+        set.headers["content-type"] = "video/ogg";
+        set.headers["cache-control"] = "no-cache";
+
+        // ReadableStream from ffmpeg stdout.
+        const readable = new ReadableStream({
+          start(controller) {
+            ff.stdout.on("data", (chunk: Buffer) => {
+              controller.enqueue(new Uint8Array(chunk));
+            });
+            ff.stdout.on("end", () => {
+              controller.close();
+            });
+            ff.stdout.on("error", (err) => {
+              controller.error(err);
+            });
+            ff.on("close", () => {
+              try { controller.close(); } catch { /* already closed */ }
+            });
+          },
+          cancel() {
+            ff.kill("SIGKILL");
+          },
+        });
+
+        return readable;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        set.status =
+          msg === "ytdlp_missing" || msg === "ffmpeg_missing" ? 503 :
+          msg === "resolve_timeout" ? 504 :
+          msg === "private_host" || msg === "unsupported_scheme" || msg === "invalid_url" ? 400 :
+          422;
+        return { error: msg };
+      }
+    },
+    { query: t.Object({ url: t.String() }) },
   );
