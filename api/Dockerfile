@@ -3,10 +3,9 @@
 FROM oven/bun:1 AS base
 WORKDIR /app
 
-# yt-dlp powers /v1/video/resolve (YouTube, Niconico, Bilibili, …). Clients — especially
-# Quest — cannot run it themselves, so page URLs are turned into stream URLs here.
+# yt-dlp and ffmpeg power /v1/video/resolve and /v1/video/transcode.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 ca-certificates curl \
+    && apt-get install -y --no-install-recommends python3 ca-certificates curl ffmpeg \
     && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp \
     && rm -rf /var/lib/apt/lists/*
