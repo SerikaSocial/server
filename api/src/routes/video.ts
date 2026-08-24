@@ -19,6 +19,17 @@ const CACHE_TTL_SECONDS = 60 * 30; // resolved URLs are usually signed and expir
 const RESOLVE_TIMEOUT_MS = 25_000;
 const YTDLP = process.env.YTDLP_PATH ?? "yt-dlp";
 
+/// Live server-side transcodes. Each one is a whole ffmpeg process pinning a core, so this is
+/// capped rather than left to grow with demand; over the cap the endpoint returns 503 and the
+/// client falls back or retries. Most desktop clients transcode locally and never come here.
+const MAX_CONCURRENT_TRANSCODES = Number(process.env.MAX_CONCURRENT_TRANSCODES ?? 1);
+/// Threads and vertical resolution for a server-side transcode. Bounded so one clip cannot
+/// pin the whole box: this endpoint is only a fallback for clients without local ffmpeg, and
+/// the API shares its host with everything else.
+const SERVER_ENCODE_THREADS = Number(process.env.VIDEO_ENCODE_THREADS ?? 2);
+const SERVER_MAX_HEIGHT = Number(process.env.VIDEO_MAX_HEIGHT ?? 480);
+let activeTranscodes = 0;
+
 export type Protocol = "progressive" | "hls" | "dash";
 
 export interface Track {
@@ -299,12 +310,15 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
 
       try {
         const resolved = await resolveVideo(url);
-        // Find best video track (preferably <= 720p for fast transcode)
-        const track = resolved.tracks.find(t => (t.height ?? 0) <= 720) ?? resolved.tracks[0];
+        // Prefer a track at or below the encode cap so ffmpeg isn't downscaling a 1080p/4K
+        // source it will only throw away — that decode is pure wasted CPU on a shared box.
+        const track = resolved.tracks.find(t => (t.height ?? 0) <= SERVER_MAX_HEIGHT)
+          ?? resolved.tracks.find(t => (t.height ?? 0) <= 720)
+          ?? resolved.tracks[0];
         if (!track) { set.status = 422; return { error: "no_playable_streams" }; }
 
         // Build ffmpeg args: input from the resolved URL (+ audioUrl if separate) → ogv/Theora output to stdout.
-        const ffArgs: string[] = ["-y"];
+        const ffArgs: string[] = ["-y", "-threads", String(SERVER_ENCODE_THREADS)];
 
         // Video input
         if (resolved.headers["User-Agent"]) ffArgs.push("-user_agent", resolved.headers["User-Agent"]);
@@ -325,11 +339,12 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
           ffArgs.push("-map", "0:v:0", "-map", "0:a:0?");
         }
 
-        // Video and Audio codec settings for Godot VideoStreamTheora
+        // Video and Audio codec settings for Godot VideoStreamTheora. Cap height (even
+        // dimensions for yuv420p) and thread count so a fallback transcode stays cheap.
         ffArgs.push(
-          "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+          "-vf", `scale=-2:min(${SERVER_MAX_HEIGHT}\\,ih)`,
           "-pix_fmt", "yuv420p",
-          "-c:v", "libtheora", "-q:v", "6",
+          "-c:v", "libtheora", "-q:v", "5", "-threads", String(SERVER_ENCODE_THREADS),
           "-c:a", "libvorbis", "-q:a", "4",
           "-shortest",
           "-f", "ogg",
@@ -338,44 +353,72 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
 
         const ffEnv: Record<string, string> = { ...process.env as Record<string, string> };
 
+        // Every request spawns a full transcode, which is the most expensive thing this
+        // service does. Without a cap, N concurrent viewers means N ffmpeg processes and the
+        // box falls over; refusing early is much better than dying.
+        if (activeTranscodes >= MAX_CONCURRENT_TRANSCODES) {
+          set.status = 503;
+          return { error: "transcode_busy" };
+        }
+
+        // stderr is `ignore`, not `pipe`. A piped stderr that nothing reads fills its 64 KB
+        // kernel buffer and then blocks ffmpeg forever mid-write — the process wedges, holds
+        // its resources, and only dies on the timeout SIGKILL. ffmpeg writes progress there
+        // continuously, so this was reliably reached on any clip of real length.
         const ff = spawn(FFMPEG, ffArgs, {
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["ignore", "pipe", "ignore"],
           env: ffEnv,
         });
 
-        const timer = setTimeout(() => {
-          ff.kill("SIGKILL");
-        }, TRANSCODE_TIMEOUT_MS);
+        activeTranscodes++;
+        const timer = setTimeout(() => { try { ff.kill("SIGKILL"); } catch { /* gone */ } },
+                                 TRANSCODE_TIMEOUT_MS);
 
-        ff.on("error", (e) => {
+        // Exactly-once cleanup: several of the handlers below can fire for the same transcode
+        // (stdout end *and* process close, say), and double-decrementing the slot counter
+        // would slowly hand out more concurrent transcodes than the cap allows.
+        let released = false;
+        const release = () => {
+          if (released) return;
+          released = true;
+          activeTranscodes--;
           clearTimeout(timer);
-          if ((e as any).code === "ENOENT") {
-            set.status = 503;
-          }
-        });
+          if (!ff.killed) { try { ff.kill("SIGKILL"); } catch { /* already gone */ } }
+        };
 
-        ff.on("close", () => {
-          clearTimeout(timer);
-        });
+        ff.on("error", release);
+        ff.on("close", release);
 
-        // ReadableStream from ffmpeg stdout.
+        // ReadableStream from ffmpeg stdout, *with backpressure*. The previous version
+        // enqueued every chunk the moment it arrived, so if the client read slower than
+        // ffmpeg encoded — the normal case, since ffmpeg outruns most connections — the queue
+        // grew without bound until the process ran out of memory. Pausing the pipe when the
+        // consumer is behind is what keeps memory flat.
         const readable = new ReadableStream({
           start(controller) {
             ff.stdout.on("data", (chunk: Buffer) => {
               controller.enqueue(new Uint8Array(chunk));
+              if ((controller.desiredSize ?? 1) <= 0) ff.stdout.pause();
             });
             ff.stdout.on("end", () => {
-              controller.close();
+              release();
+              try { controller.close(); } catch { /* already closed */ }
             });
             ff.stdout.on("error", (err) => {
-              controller.error(err);
+              release();
+              try { controller.error(err); } catch { /* already errored */ }
             });
             ff.on("close", () => {
+              release();
               try { controller.close(); } catch { /* already closed */ }
             });
           },
+          pull() {
+            ff.stdout.resume();
+          },
           cancel() {
-            ff.kill("SIGKILL");
+            // The viewer navigated away or skipped — stop burning CPU on a stream nobody wants.
+            release();
           },
         });
 

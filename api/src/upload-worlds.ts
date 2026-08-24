@@ -65,9 +65,9 @@ const WORLDS: WorldSpec[] = [
     worldId: "00000000-0000-0000-0000-0000000000e3",
     name: "Cinema",
     description:
-      "A proper picture house: a 16-metre screen behind scarlet curtains, six raked rows of 48 real seats, glowing aisle strips and warm sconces. Grab a seat, the film's already rolling.",
+      "A proper picture house: an 11-metre screen framed by deep violet curtains, seven raked rows of 112 real seats, step lights down the aisle and a cove-lit ceiling. Grab a seat, the film's already rolling.",
     tags: ["video", "cinema", "watch-party"],
-    capacity: 48,
+    capacity: 64,
     heat: 800,
   },
   {
@@ -107,6 +107,15 @@ const WORLDS: WorldSpec[] = [
     name: "Test: Sphere Garden",
     description: "Thirty scattered spheres plus three big translucent ones. Tests curved collision, transparency and sorting.",
     tags: ["test", "debug"],
+    capacity: 16,
+    heat: 100,
+  },
+  {
+    worldId: "00000000-0000-0000-0000-0000000000eb",
+    name: "Test: Video Room",
+    description:
+      "A bare room with one 6.4×3.6 m screen and four seats. The control case for video problems: if a clip plays here but not in the Cinema, the fault is the Cinema's geometry, not the player. The yellow post is exactly 1.8 m for checking avatar scale.",
+    tags: ["test", "debug", "video"],
     capacity: 16,
     heat: 100,
   },
