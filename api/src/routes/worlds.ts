@@ -5,7 +5,9 @@ import { prisma, redis } from "../db.ts";
 import { assetPublicUrl, putBytes } from "../storage.ts";
 import { authed } from "../auth-plugin.ts";
 import { sweepStaleInstances } from "./instances.ts";
-import { requireTrust, TrustError, TRUST_TO_UPLOAD, trustLabel } from "../trust.ts";
+import { requireTrust, TrustError, TRUST_TO_UPLOAD, trustLabel, Cap, effectiveRank } from "../trust.ts";
+import { validateBundle, routeSubmission, ReviewStatus, REVIEW_LABELS, PUBLISHED_STATES } from "../review.ts";
+import { audit } from "../audit.ts";
 
 // A world upload is capped well above the largest bundle we ship (~70 MB).
 const MAX_WORLD_BYTES = 400 * 1024 * 1024;
@@ -127,18 +129,20 @@ export const worldUploadRoutes = new Elysia({ prefix: "/v1/worlds" })
     });
     return { worlds: worlds.map(serializeWorld) };
   })
-  // Upload a world bundle (multipart `file`). Creates a public, community-authored world.
+  // Upload a world bundle (multipart `file`). Creates a *submission* — never a self-published
+  // public world. Where it lands depends on the author's trust rank and whether the bundle
+  // contains script/executable content (see review.ts routeSubmission).
   .post(
     "/upload",
     async ({ body, session, set }) => {
-      // Publishing a world makes it public to everyone — gate it on trust standing.
+      // Everyone who submits needs at least the static-world floor.
       try {
-        await requireTrust(session.sub, TRUST_TO_UPLOAD);
+        await requireTrust(session.sub, Cap.SubmitStaticWorld);
       } catch (e) {
         if (e instanceof TrustError) {
           set.status = 403;
           return { error: "insufficient_trust", required: e.required, have: e.have,
-                   detail: `Publishing worlds needs trust level ${e.required} (${trustLabel(e.required)}); you are ${e.have} (${trustLabel(e.have)}).` };
+                   detail: `Submitting worlds needs trust ${e.required} (${trustLabel(e.required)}); you are ${e.have} (${trustLabel(e.have)}).` };
         }
         throw e;
       }
@@ -159,6 +163,25 @@ export const worldUploadRoutes = new Elysia({ prefix: "/v1/worlds" })
         return { error: msg.split(":")[0], detail: msg };
       }
 
+      // Automated validation + routing.
+      const [rank, caller] = await Promise.all([
+        effectiveRank(session.sub),
+        prisma.user.findUnique({ where: { id: session.sub }, select: { isAdmin: true } }),
+      ]);
+      const report = validateBundle(bundle, rank);
+
+      // Scripted content requires the scripted-submit rank to even enter the pipeline.
+      if (report.hasScript && !caller?.isAdmin && rank < Cap.SubmitScriptedWorld) {
+        set.status = 403;
+        return {
+          error: "insufficient_trust", required: Cap.SubmitScriptedWorld, have: rank,
+          detail: `This world contains script; submitting scripted worlds needs trust ${Cap.SubmitScriptedWorld} (${trustLabel(Cap.SubmitScriptedWorld)}).`,
+        };
+      }
+
+      const decision = routeSubmission(rank, report, !!caller?.isAdmin);
+      const published = PUBLISHED_STATES.has(decision.reviewStatus);
+
       const hash = createHash("sha256").update(bundle).digest("hex");
       const key = `wl/${hash.slice(0, 2)}/${hash}/world.serikaworld`;
       await putBytes(key, bundle, "application/zip");
@@ -170,24 +193,50 @@ export const worldUploadRoutes = new Elysia({ prefix: "/v1/worlds" })
           name,
           description: (body.description ?? "").slice(0, 2000),
           tags: (body.tags ?? "").split(",").map((s) => s.trim()).filter(Boolean).slice(0, 12),
-          releaseStatus: 2, // public
+          // Only becomes public once a version is published; otherwise stays private (0).
+          releaseStatus: published ? 2 : 0,
           isBuiltin: false,
           versions: {
             create: {
               version: 1,
-              buildStatus: 2, // ready
+              buildStatus: 2, // ready (asset is already a finished bundle)
+              reviewStatus: decision.reviewStatus,
+              hasScript: decision.hasScript,
+              validatorReport: report as any,
               assets: { create: [0, 1, 2].map((platform) => ({ platform, blake3, bytes: BigInt(bundle.length), cdnKey: key })) },
             },
           },
         },
         include: {
           author: { select: { username: true } },
-          versions: { where: { buildStatus: 2 }, orderBy: { version: "desc" }, take: 1, include: { assets: true } },
+          versions: { orderBy: { version: "desc" }, take: 1, include: { assets: true } },
         },
       });
-      await prisma.world.update({ where: { id: world.id }, data: { publishedVersionId: world.versions[0].id } });
+      const version = world.versions[0];
 
-      return { world: serializeWorld(world) };
+      if (published) {
+        await prisma.world.update({ where: { id: world.id }, data: { publishedVersionId: version.id } });
+        if (decision.selfPublishScripted) {
+          // Top-rank scripted self-publish: record a self-review row + audit, land in spot-audit.
+          await prisma.worldReview.create({
+            data: { worldVersionId: version.id, reviewerId: session.sub, decision: 0, notes: "top-rank self-publish", selfPublish: true },
+          });
+          await audit("world.self_publish", { actorId: session.sub, subjectId: version.id, detail: { rank, name } });
+        } else {
+          await audit("world.publish", { actorId: session.sub, subjectId: version.id, detail: { rank, name, auto: true } });
+        }
+      }
+
+      return {
+        submissionId: version.id,
+        worldId: world.id,
+        reviewStatus: decision.reviewStatus,
+        reviewStatusLabel: REVIEW_LABELS[decision.reviewStatus],
+        hasScript: decision.hasScript,
+        published,
+        validator: { ok: report.ok, errors: report.errors, warnings: report.warnings, bundleBytes: report.bundleBytes, budgetBytes: report.budgetBytes },
+        world: published ? serializeWorld(world) : undefined,
+      };
     },
     {
       body: t.Object({

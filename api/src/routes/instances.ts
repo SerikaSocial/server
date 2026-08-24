@@ -3,6 +3,21 @@ import { prisma, redis } from "../db.ts";
 import { authed } from "../auth-plugin.ts";
 import { signTicket } from "../tokens.ts";
 import { place } from "../allocator.ts";
+import { PUBLISHED_STATES } from "../review.ts";
+
+/// A world is joinable by others only when its published version cleared review. The author
+/// (and admins) may launch their own submission privately to iterate — no one else can, and it
+/// never appears in the browser. Returns an error string when the caller may not join.
+async function joinGate(world: { authorId: string | null; publishedVersionId: string | null; isBuiltin: boolean }, userId: string): Promise<string | null> {
+  if (world.isBuiltin) return null;
+  if (world.authorId === userId) return null; // author private test
+  const caller = await prisma.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
+  if (caller?.isAdmin) return null;
+  if (!world.publishedVersionId) return "not_published";
+  const pv = await prisma.worldVersion.findUnique({ where: { id: world.publishedVersionId }, select: { reviewStatus: true } });
+  if (!pv || !PUBLISHED_STATES.has(pv.reviewStatus)) return "not_published";
+  return null;
+}
 
 /// Close instances whose Redis roster is empty and have been idle for a grace period.
 /// Called opportunistically from the world detail endpoint and from the periodic sweep.
@@ -45,6 +60,8 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
         set.status = 404;
         return { error: "world_not_found" };
       }
+      const gate = await joinGate(world, session.sub);
+      if (gate) { set.status = 403; return { error: gate }; }
 
       const placement = await place({
         capacity: world.capacity,
@@ -101,6 +118,8 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
         set.status = 404;
         return { error: "world_not_found" };
       }
+      const gate = await joinGate(world, session.sub);
+      if (gate) { set.status = 403; return { error: gate }; }
 
       // Prefer an existing open public instance with room; oldest first so everyone funnels
       // into the same one rather than scattering across half-empty instances.
@@ -211,7 +230,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
 
 /// Mint a single-use join ticket and record its jti so the relay can reject replays. The
 /// relay marks it used via the gateway; we only need to pre-register the id with a TTL.
-async function mintTicket(instanceId: string, userId: string) {
+export async function mintTicket(instanceId: string, userId: string) {
   const user = await prisma.user.findUnique({ where: { id: userId } });
   if (!user) return null;
   const { token, jti } = await signTicket({
