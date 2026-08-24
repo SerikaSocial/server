@@ -13,6 +13,7 @@ import { rtcRoutes } from "./routes/rtc.ts";
 import { videoRoutes } from "./routes/video.ts";
 import { reviewPublicRoutes, reviewRoutes } from "./routes/reviews.ts";
 import { adminReviewRoutes } from "./routes/admin-review.ts";
+import { adminSystemRoutes } from "./routes/admin-system.ts";
 import { publicUserRoutes, authedUserRoutes } from "./routes/users.ts";
 import { startInstanceSweep } from "./routes/instances.ts";
 
@@ -38,6 +39,7 @@ const app = new Elysia()
   .use(avatarRoutes)
   .use(adminRoutes)
   .use(adminReviewRoutes)
+  .use(adminSystemRoutes)
   .use(rtcRoutes)
   .use(videoRoutes)
   .use(reviewPublicRoutes)

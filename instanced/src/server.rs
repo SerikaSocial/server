@@ -365,6 +365,20 @@ impl Server {
     }
 
     async fn sweep_timeouts(&mut self) {
+        // Maintenance mode: if the flag is set in Redis, kick every connected peer.
+        let maint: Option<String> = self.redis.get("maintenance:enabled").await.ok().flatten();
+        if maint.as_deref() == Some("1") && !self.peers.is_empty() {
+            tracing::warn!("maintenance mode active — kicking {} peers", self.peers.len());
+            let addrs: Vec<SocketAddr> = self.peers.keys().cloned().collect();
+            for addr in &addrs {
+                let _ = self.socket.send_to(&write_reject("maintenance mode"), *addr).await;
+            }
+            for addr in addrs {
+                self.remove_peer(addr).await;
+            }
+            return;
+        }
+
         let now = Instant::now();
         let dead: Vec<SocketAddr> = self
             .peers

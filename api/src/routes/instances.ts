@@ -1,9 +1,17 @@
 import { Elysia, t } from "elysia";
-import { prisma, redis } from "../db.ts";
+import { prisma, redis, keys } from "../db.ts";
 import { authed } from "../auth-plugin.ts";
 import { signTicket } from "../tokens.ts";
 import { place } from "../allocator.ts";
 import { PUBLISHED_STATES } from "../review.ts";
+
+/// Check maintenance mode — returns true if the flag is set in Redis. Admins bypass it.
+async function isMaintenance(userId: string): Promise<boolean> {
+  const flag = await redis.get(keys.maintenance);
+  if (flag !== "1") return false;
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
+  return !user?.isAdmin;
+}
 
 /// A world is joinable by others only when its published version cleared review. The author
 /// (and admins) may launch their own submission privately to iterate — no one else can, and it
@@ -62,6 +70,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       }
       const gate = await joinGate(world, session.sub);
       if (gate) { set.status = 403; return { error: gate }; }
+      if (await isMaintenance(session.sub)) { set.status = 503; return { error: "maintenance" }; }
 
       const placement = await place({
         capacity: world.capacity,
@@ -120,6 +129,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       }
       const gate = await joinGate(world, session.sub);
       if (gate) { set.status = 403; return { error: gate }; }
+      if (await isMaintenance(session.sub)) { set.status = 503; return { error: "maintenance" }; }
 
       // Prefer an existing open public instance with room; oldest first so everyone funnels
       // into the same one rather than scattering across half-empty instances.
@@ -188,6 +198,8 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       set.status = 409;
       return { error: "instance_full" };
     }
+
+    if (await isMaintenance(session.sub)) { set.status = 503; return { error: "maintenance" }; }
 
     const ticket = await mintTicket(instance.id, session.sub);
     if (!ticket) {

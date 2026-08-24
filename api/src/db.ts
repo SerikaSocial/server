@@ -23,4 +23,6 @@ export const keys = {
   onlineUsers: "online:users",
   /// Consumed-ticket guard so a join ticket cannot be replayed.
   ticketUsed: (jti: string) => `ticket:used:${jti}`,
+  /// Maintenance mode flag — when set, join endpoints reject and the relay kicks all peers.
+  maintenance: "maintenance:enabled",
 };
