@@ -22,7 +22,8 @@ model User {
   avatarUrl     String?   @map("avatar_url")
   isPremium     Boolean   @default(false) @map("is_premium")
   isAdmin       Boolean   @default(false) @map("is_admin")
-  /// 0=visitor 1=new 2=user 3=known 4=trusted — gates who can upload/host.
+  /// Trust ladder 0..8 — see TrustRank in api/src/trust.ts.
+  /// 0=visitor 1=newcomer 2=member 3=regular 4=known 5=creator 6=trusted 7=partner 8=verified-creator
   trustLevel    Int       @default(0) @map("trust_level")
   currentAvatarId String? @map("current_avatar_id") @db.Uuid
   lastSeen      DateTime? @map("last_seen")
@@ -124,14 +125,61 @@ model WorldVersion {
   version         Int
   /// 0=uploaded 1=building 2=ready 3=failed
   buildStatus     Int      @default(0) @map("build_status")
+  /// Review state machine — see ReviewStatus in api/src/review.ts.
+  /// 0=draft 1=submitted 2=auto_approved 3=in_review 4=changes_requested 5=approved 6=rejected 7=withdrawn
+  reviewStatus    Int      @default(0) @map("review_status")
+  /// Set when SerikaScript bytecode / executable content is detected in the bundle.
+  hasScript       Boolean  @default(false) @map("has_script")
+  /// Automated validator verdict (asset budget, whitelist, script static-analysis).
   validatorReport Json?    @map("validator_report")
+  reviewedById    String?  @map("reviewed_by_id") @db.Uuid
+  reviewedAt      DateTime? @map("reviewed_at")
+  reviewNotes     String   @default("") @map("review_notes")
   createdAt       DateTime @default(now()) @map("created_at")
 
-  world  World        @relation(fields: [worldId], references: [id], onDelete: Cascade)
-  assets WorldAsset[]
+  world   World         @relation(fields: [worldId], references: [id], onDelete: Cascade)
+  assets  WorldAsset[]
+  reviews WorldReview[]
 
   @@unique([worldId, version])
+  @@index([reviewStatus])
   @@map("world_versions")
+}
+
+/// One immutable row per review decision on a world version. The queue reads the version's
+/// `reviewStatus`; this table is the durable history behind it.
+model WorldReview {
+  id             String   @id @default(uuid()) @db.Uuid
+  worldVersionId String   @map("world_version_id") @db.Uuid
+  reviewerId     String   @map("reviewer_id") @db.Uuid
+  /// 0=approve 1=reject 2=request_changes
+  decision       Int
+  notes          String   @default("")
+  /// True when the "reviewer" is the top-trust author self-publishing (spot-audit candidate).
+  selfPublish    Boolean  @default(false) @map("self_publish")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  version WorldVersion @relation(fields: [worldVersionId], references: [id], onDelete: Cascade)
+
+  @@index([worldVersionId])
+  @@map("world_reviews")
+}
+
+/// Immutable audit trail for privileged actions that aren't moderation of a user: trust
+/// grants, self-publishes, publish/unpublish. See api/src/audit.ts.
+model AuditLog {
+  id        String   @id @default(uuid()) @db.Uuid
+  actorId   String?  @map("actor_id") @db.Uuid
+  /// e.g. "trust.grant", "world.self_publish", "world.publish", "world.unpublish"
+  action    String
+  /// Free-form subject reference (user id, world version id, ...).
+  subjectId String?  @map("subject_id") @db.Uuid
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([action])
+  @@index([subjectId])
+  @@map("audit_log")
 }
 
 model WorldAsset {
@@ -250,7 +298,7 @@ model ModerationAction {
   actorId    String?   @map("actor_id") @db.Uuid
   targetId   String    @map("target_id") @db.Uuid
   instanceId String?   @map("instance_id") @db.Uuid
-  /// 0=warn 1=kick 2=instance-ban 3=platform-ban
+  /// 0=warn 1=kick 2=instance-ban 3=platform-ban 4=trust-grant
   kind       Int
   reason     String    @default("")
   expiresAt  DateTime? @map("expires_at")

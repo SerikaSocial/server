@@ -7,6 +7,7 @@ import { vrmOrGlbToSka, pmxToSka, sniffKind, extractThumbnail } from "../ska.ts"
 import { parsePMX } from "../pmx.ts";
 import { unzipSync } from "fflate";
 import { extname } from "node:path";
+import { requireTrust, TrustError, TRUST_TO_UPLOAD, trustLabel, MAX_TRUST } from "../trust.ts";
 
 // Avatar catalogue + upload → `.ska` conversion.
 //
@@ -227,6 +228,18 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
   .post(
     "/upload",
     async ({ body, session, set }) => {
+      // Public avatar upload — same trust gate as world publishing.
+      try {
+        await requireTrust(session.sub, TRUST_TO_UPLOAD);
+      } catch (e) {
+        if (e instanceof TrustError) {
+          set.status = 403;
+          return { error: "insufficient_trust", required: e.required, have: e.have,
+                   detail: `Uploading avatars needs trust level ${e.required} (${trustLabel(e.required)}); you are ${e.have} (${trustLabel(e.have)}).` };
+        }
+        throw e;
+      }
+
       const file = body.file as File;
       if (!file) { set.status = 400; return { error: "missing_file" }; }
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -454,4 +467,48 @@ export const adminRoutes = new Elysia({ prefix: "/v1/admin" })
       return { ok: true, defaultHomeId: params.id };
     },
     { params: t.Object({ id: t.String() }) },
+  )
+
+  // Grant (or set) a user's trust rank. Writes the new level and an audit row so manual
+  // rank changes are durable and reviewable. ModerationAction.kind 4 = trust-grant; the new
+  // level is recorded in `reason` alongside the human reason.
+  .post(
+    "/users/:id/trust",
+    async ({ admin, params, body, set }) => {
+      const target = await prisma.user.findUnique({
+        where: { id: params.id },
+        select: { id: true, trustLevel: true },
+      });
+      if (!target) { set.status = 404; return { error: "not_found" }; }
+      if (body.level < 0 || body.level > MAX_TRUST) {
+        set.status = 400;
+        return { error: "invalid_level", max: MAX_TRUST };
+      }
+
+      await prisma.$transaction([
+        prisma.user.update({ where: { id: params.id }, data: { trustLevel: body.level } }),
+        prisma.moderationAction.create({
+          data: {
+            actorId: admin.sub,
+            targetId: params.id,
+            kind: 4,
+            reason: `trust ${target.trustLevel}→${body.level}: ${body.reason ?? ""}`.trim(),
+          },
+        }),
+      ]);
+
+      return {
+        ok: true,
+        userId: params.id,
+        trustLevel: body.level,
+        trustLabel: trustLabel(body.level),
+      };
+    },
+    {
+      params: t.Object({ id: t.String() }),
+      body: t.Object({
+        level: t.Integer({ minimum: 0, maximum: MAX_TRUST }),
+        reason: t.Optional(t.String({ maxLength: 500 })),
+      }),
+    },
   );

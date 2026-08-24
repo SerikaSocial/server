@@ -70,6 +70,30 @@ export const publicUserRoutes = new Elysia({ prefix: "/v1/users" })
       };
     },
     { params: t.Object({ username: t.String() }) },
+  )
+  /// Minimal card by user *id*. The relay only carries a peer's account id, so this is how the
+  /// game turns that into a display name + profile picture for the floating name tag. Public and
+  /// read-only, and deliberately tiny — never expand it into the full profile above.
+  .get(
+    "/by-id/:id/card",
+    async ({ params, set }) => {
+      const user = await prisma.user.findUnique({
+        where: { id: params.id },
+        select: { id: true, username: true, displayName: true, avatarUrl: true, trustLevel: true },
+      });
+      if (!user) {
+        set.status = 404;
+        return { error: "user_not_found" };
+      }
+      return {
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        avatarUrl: user.avatarUrl,
+        trustLevel: user.trustLevel,
+      };
+    },
+    { params: t.Object({ id: t.String() }) },
   );
 
 /// Authed user profile routes — follow status, block status, etc.

@@ -5,6 +5,7 @@ import { prisma, redis } from "../db.ts";
 import { assetPublicUrl, putBytes } from "../storage.ts";
 import { authed } from "../auth-plugin.ts";
 import { sweepStaleInstances } from "./instances.ts";
+import { requireTrust, TrustError, TRUST_TO_UPLOAD, trustLabel } from "../trust.ts";
 
 // A world upload is capped well above the largest bundle we ship (~70 MB).
 const MAX_WORLD_BYTES = 400 * 1024 * 1024;
@@ -130,6 +131,18 @@ export const worldUploadRoutes = new Elysia({ prefix: "/v1/worlds" })
   .post(
     "/upload",
     async ({ body, session, set }) => {
+      // Publishing a world makes it public to everyone — gate it on trust standing.
+      try {
+        await requireTrust(session.sub, TRUST_TO_UPLOAD);
+      } catch (e) {
+        if (e instanceof TrustError) {
+          set.status = 403;
+          return { error: "insufficient_trust", required: e.required, have: e.have,
+                   detail: `Publishing worlds needs trust level ${e.required} (${trustLabel(e.required)}); you are ${e.have} (${trustLabel(e.have)}).` };
+        }
+        throw e;
+      }
+
       const file = body.file as File;
       if (!file) { set.status = 400; return { error: "missing_file" }; }
       const raw = new Uint8Array(await file.arrayBuffer());
