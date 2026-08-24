@@ -4,12 +4,13 @@ import { config } from "./config.ts";
 import { prisma, redis } from "./db.ts";
 import { sessionRoutes } from "./routes/session.ts";
 import { webAuthRoutes } from "./routes/web-auth.ts";
-import { worldRoutes } from "./routes/worlds.ts";
+import { worldRoutes, worldUploadRoutes } from "./routes/worlds.ts";
 import { instanceRoutes } from "./routes/instances.ts";
 import { assetRoutes } from "./routes/assets.ts";
 import { friendRoutes } from "./routes/social.ts";
 import { avatarPublicRoutes, assetFileRoutes, avatarRoutes, adminRoutes } from "./routes/avatars.ts";
 import { rtcRoutes } from "./routes/rtc.ts";
+import { videoRoutes } from "./routes/video.ts";
 import { reviewPublicRoutes, reviewRoutes } from "./routes/reviews.ts";
 import { publicUserRoutes, authedUserRoutes } from "./routes/users.ts";
 import { startInstanceSweep } from "./routes/instances.ts";
@@ -27,6 +28,7 @@ const app = new Elysia()
   .use(sessionRoutes)
   .use(webAuthRoutes)
   .use(worldRoutes)
+  .use(worldUploadRoutes)
   .use(instanceRoutes)
   .use(assetRoutes)
   .use(friendRoutes)
@@ -35,6 +37,7 @@ const app = new Elysia()
   .use(avatarRoutes)
   .use(adminRoutes)
   .use(rtcRoutes)
+  .use(videoRoutes)
   .use(reviewPublicRoutes)
   .use(reviewRoutes)
   .use(publicUserRoutes)

@@ -3,6 +3,14 @@
 FROM oven/bun:1 AS base
 WORKDIR /app
 
+# yt-dlp powers /v1/video/resolve (YouTube, Niconico, Bilibili, …). Clients — especially
+# Quest — cannot run it themselves, so page URLs are turned into stream URLs here.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 ca-certificates curl \
+    && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install workspace deps (root + api + gateway manifests) with the lockfile for reproducibility.
 COPY package.json bun.lock ./
 COPY api/package.json ./api/

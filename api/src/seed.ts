@@ -69,15 +69,16 @@ async function main() {
   const pikachubolk = await prisma.user.findFirst({ where: { username: "pikachubolk" } });
   const authorId = pikachubolk?.id ?? null;
 
-  // Default world: the M1 spawn. Ships inside the client, so it needs no CDN asset.
+  // Default world. Geometry lives on the CDN as a .serikaworld bundle (see upload-worlds.ts);
+  // this row only carries the metadata.
   const world = await prisma.world.upsert({
     where: { id: "00000000-0000-0000-0000-0000000000e0" },
     create: {
       id: "00000000-0000-0000-0000-0000000000e0",
       name: "The Commons",
-      description: "The default gathering place. Built into the client.",
-      tags: ["hangout", "default"],
-      capacity: 32,
+      description: "The heart of Serika. A marble plaza under a great domed colonnade, a tiered fountain lit from within, gardens and lamplit benches on every side. Twelve pillars, endless conversations. Start here.",
+      tags: ["hangout", "default", "social"],
+      capacity: 48,
       releaseStatus: 2,
       isBuiltin: true,
       isDefaultHome: true, // placeholder default Home until a dedicated home world exists
@@ -87,20 +88,20 @@ async function main() {
   });
 
   // ── Community worlds by pikachubolk ─────────────────────────────────────────────
-  // These are genuine public worlds (not builtin) attributed to pikachubolk.
-  // The client renders them by ID via Worlds.BuildWorldForId() — no CDN asset needed.
+  // These are genuine public worlds (not builtin) attributed to pikachubolk. Geometry is
+  // cloud-hosted: `bun src/upload-worlds.ts` builds each .serikaworld and registers its asset.
 
   const communityWorlds = [
-    { id: "00000000-0000-0000-0000-0000000000e1", name: "Mirror Gallery", description: "A room lined with mirrors on every wall. Check your avatar from every angle. Bright even lighting, central pedestal, eight full-length mirrors.", tags: ["mirror", "social"], capacity: 16, heat: 500 },
-    { id: "00000000-0000-0000-0000-0000000000e2", name: "Serika Home", description: "The cosy Home house as a multiplayer world. Warm fireplace, couch, coffee table, bookshelf, mirror — all the comforts of home, now with friends.", tags: ["home", "social"], capacity: 8, heat: 400 },
-    { id: "00000000-0000-0000-0000-0000000000e3", name: "Cinema", description: "A cinema-style world with a large 12m screen and tiered seating. Dim ambient lighting for that movie theatre vibe. Perfect for watch parties.", tags: ["video", "social", "cinema"], capacity: 32, heat: 300 },
-    { id: "00000000-0000-0000-0000-0000000000e4", name: "Test: Empty Room", description: "Minimal test room — floor, four walls, grid lines. The blank canvas for testing movement, collision, and avatar scaling.", tags: ["test", "debug"], capacity: 16, heat: 100 },
-    { id: "00000000-0000-0000-0000-0000000000e5", name: "Test: Pillar Maze", description: "A grid of collidable pillars for navigation and pathfinding testing. 7×7 grid with 6m spacing.", tags: ["test", "debug"], capacity: 16, heat: 100 },
-    { id: "00000000-0000-0000-0000-0000000000e6", name: "Test: Ramps", description: "Platforms at different heights connected by ramps. Tests slope collision, gravity, and jumping.", tags: ["test", "debug"], capacity: 16, heat: 100 },
-    { id: "00000000-0000-0000-0000-0000000000e7", name: "Test: Color Grid", description: "A floor of 100 differently colored tiles arranged in a 10×10 grid. Tests material rendering and color perception.", tags: ["test", "debug"], capacity: 16, heat: 100 },
-    { id: "00000000-0000-0000-0000-0000000000e8", name: "Test: Sphere Garden", description: "A scattering of 30 decorative spheres in various sizes and colors, plus three large translucent spheres. Tests sphere collision and transparency.", tags: ["test", "debug"], capacity: 16, heat: 100 },
-    { id: "00000000-0000-0000-0000-0000000000e9", name: "Backrooms", description: "Yellow wallpaper maze with flickering fluorescent lights and damp carpet. Liminal horror atmosphere. Placeholder geometry — full 3D model coming.", tags: ["maze", "horror", "liminal"], capacity: 16, heat: 200 },
-    { id: "00000000-0000-0000-0000-0000000000ea", name: "Gryffindor Common Room", description: "Warm cozy common room with a roaring fireplace, red and gold decor, squishy sofas, bookshelves, and a winding staircase. Placeholder geometry — full 3D model coming.", tags: ["hogwarts", "social", "cozy"], capacity: 16, heat: 250 },
+    { id: "00000000-0000-0000-0000-0000000000e1", name: "Mirror Gallery", description: "A hall of eight true-reflection mirrors in gilded frames. Step onto the central pedestal and see your avatar from every angle — real-time reflections, not fakes. The place to show off a new outfit.", tags: ["mirror", "social"], capacity: 16, heat: 500 },
+    { id: "00000000-0000-0000-0000-0000000000e2", name: "Serika Home", description: "The cosy house, opened up to friends. Crackling fireplace, a couch that seats three, armchairs, a bookshelf and a full-length mirror by the window. Sit down and stay a while.", tags: ["home", "social"], capacity: 12, heat: 400 },
+    { id: "00000000-0000-0000-0000-0000000000e3", name: "Cinema", description: "A proper picture house: a 16-metre screen behind scarlet curtains, six raked rows of 48 real seats, glowing aisle strips and warm sconces. Grab a seat, the film's already rolling.", tags: ["video", "social", "cinema"], capacity: 48, heat: 300 },
+    { id: "00000000-0000-0000-0000-0000000000e4", name: "Test: Empty Room", description: "A clean 40×40 hall with a glowing grid floor. The blank canvas for testing movement, collision and avatar scale.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e5", name: "Test: Pillar Maze", description: "A 7×7 grid of collidable pillars with the centre kept clear. For navigation, occlusion and pathfinding tests.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e6", name: "Test: Ramps", description: "Four platforms at rising heights joined by slopes. Tests slope collision, gravity, step-up and jump arcs.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e7", name: "Test: Color Grid", description: "A hundred hue-swept tiles in a 10×10 grid. Tests material rendering, colour accuracy and tone mapping.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e8", name: "Test: Sphere Garden", description: "Thirty scattered spheres plus three big translucent ones. Tests curved collision, transparency and sorting.", tags: ["test", "debug"], capacity: 16, heat: 100 },
+    { id: "00000000-0000-0000-0000-0000000000e9", name: "Backrooms", description: "You noclipped out of reality. Endless mono-yellow hallways, damp moquette, the maddening 120Hz hum of fluorescent lights. 5+ million faithful triangles of pure liminal dread. Don't stop moving.", tags: ["maze", "horror", "liminal"], capacity: 24, heat: 900 },
+    { id: "00000000-0000-0000-0000-0000000000ea", name: "Gryffindor Common Room", description: "The cosiest room in the castle. A roaring fireplace, scarlet-and-gold everything, squashy armchairs, tapestries and a spiral stair to the dorms. Fully modelled, fully textured. Pull up a chair.", tags: ["hogwarts", "social", "cozy"], capacity: 24, heat: 850 },
   ];
 
   for (const w of communityWorlds) {
