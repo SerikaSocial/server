@@ -20,8 +20,22 @@
 //   bun api/src/repair-pmx-ska.ts --apply    # rewrite and re-upload
 //   bun api/src/repair-pmx-ska.ts --apply --id <avatarId>
 
-import { prisma } from "./db.ts";
 import { getObjectBytes, putBytes } from "./storage.ts";
+
+// Raw SQL rather than Prisma on purpose. This is a one-shot maintenance script that has to be
+// runnable from an operator's machine, and the Prisma query engine is a platform-specific binary
+// that hangs indefinitely when its target does not match the host — which is exactly what
+// happened the first time this was run. `Bun.SQL` speaks the wire protocol directly, so the only
+// requirement is that DATABASE_URL is reachable.
+const sql = new Bun.SQL(process.env.DATABASE_URL!);
+
+interface AvatarRow {
+  id: string;
+  name: string;
+  version_id: string | null;
+  cdn_key: string | null;
+  stats: Record<string, unknown> | null;
+}
 
 const GLB_MAGIC = 0x46546c67;
 const JSON_CHUNK = 0x4e4f534a;
@@ -241,23 +255,30 @@ async function main() {
   const apply = args.includes("--apply");
   const onlyId = args[args.indexOf("--id") + 1];
 
-  const avatars = await prisma.avatar.findMany({
-    where: {
-      sourceFormat: SOURCE_FORMAT_PMX,
-      ...(args.includes("--id") ? { id: onlyId } : {}),
-    },
-    include: { versions: { orderBy: { version: "desc" }, take: 1 } },
-  });
+  // Latest version row per PMX avatar. DISTINCT ON is the cheap Postgres way to say
+  // "one row per avatar, highest version wins".
+  const avatars: AvatarRow[] = args.includes("--id")
+    ? await sql`
+        SELECT DISTINCT ON (a.id) a.id, a.name, v.id AS version_id, v.cdn_key, v.stats
+        FROM avatars a LEFT JOIN avatar_versions v ON v.avatar_id = a.id
+        WHERE a.source_format = ${SOURCE_FORMAT_PMX} AND a.id = ${onlyId}::uuid
+        ORDER BY a.id, v.version DESC`
+    : await sql`
+        SELECT DISTINCT ON (a.id) a.id, a.name, v.id AS version_id, v.cdn_key, v.stats
+        FROM avatars a LEFT JOIN avatar_versions v ON v.avatar_id = a.id
+        WHERE a.source_format = ${SOURCE_FORMAT_PMX}
+        ORDER BY a.id, v.version DESC`;
 
   console.log(`${avatars.length} PMX avatar(s) to inspect${apply ? "" : " (dry run)"}\n`);
   let repaired = 0;
 
   for (const avatar of avatars) {
-    const version = avatar.versions[0];
-    if (!version) { console.log(`- ${avatar.name}: no version row, skipped`); continue; }
+    if (!avatar.version_id || !avatar.cdn_key) {
+      console.log(`- ${avatar.name}: no version row, skipped`); continue;
+    }
 
-    const bytes = await getObjectBytes(version.cdnKey);
-    if (!bytes) { console.log(`- ${avatar.name}: ${version.cdnKey} missing from storage, skipped`); continue; }
+    const bytes = await getObjectBytes(avatar.cdn_key);
+    if (!bytes) { console.log(`- ${avatar.name}: ${avatar.cdn_key} missing from storage, skipped`); continue; }
 
     let result;
     try {
@@ -281,24 +302,24 @@ async function main() {
 
     const hash = await sha256Hex(result.ska);
     const key = skaKeyFor(hash);
+    // Upload before the row moves: the old key stays valid until the update lands, so a failure
+    // here leaves clients pointed at the previous (broken, but present) file rather than a 404.
     await putBytes(key, result.ska, "application/octet-stream");
-    await prisma.avatarVersion.update({
-      where: { id: version.id },
-      data: {
-        cdnKey: key,
-        blake3: Buffer.from(hash, "hex"),
-        stats: {
-          ...(version.stats as object ?? {}),
-          sizeBytes: result.ska.length,
-          repairedAt: new Date().toISOString(),
-        },
-      },
-    });
-    console.log(`    → uploaded ${key} and updated version ${version.id}`);
+
+    const stats = {
+      ...(avatar.stats ?? {}),
+      sizeBytes: result.ska.length,
+      repairedAt: new Date().toISOString(),
+    };
+    await sql`
+      UPDATE avatar_versions
+      SET cdn_key = ${key}, blake3 = ${Buffer.from(hash, "hex")}, stats = ${JSON.stringify(stats)}::jsonb
+      WHERE id = ${avatar.version_id}::uuid`;
+    console.log(`    → uploaded ${key} and updated version ${avatar.version_id}`);
   }
 
   console.log(`\n${repaired} avatar(s) ${apply ? "repaired" : "would be repaired"}`);
-  await prisma.$disconnect();
+  await sql.end();
 }
 
 if (import.meta.main) main().catch(e => { console.error(e); process.exit(1); });
