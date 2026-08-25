@@ -10,7 +10,7 @@
 // PMX coordinate system: Y-up, right-handed (same as glTF) — no axis flip needed.
 // PMX bone positions are world-space (relative to model origin).
 
-import type { PMXModel } from "./pmx.ts";
+import { pmxUnitScale, type PMXModel } from "./pmx.ts";
 
 // ── glTF helpers ─────────────────────────────────────────────────────────────
 
@@ -41,6 +41,20 @@ interface GltfMaterial {
     roughnessFactor: number;
   };
   doubleSided?: boolean;
+  alphaMode?: "OPAQUE" | "MASK" | "BLEND";
+  alphaCutoff?: number;
+}
+
+/// Does this image carry an alpha channel? Alpha testing and blending are both expensive on tile
+/// GPUs (they defeat early-Z), so materials only opt out of `OPAQUE` when the texture actually
+/// needs it. Only PNG is sniffed — it is what MMD models overwhelmingly ship — and anything
+/// unrecognised is assumed opaque.
+function imageHasAlpha(bytes: Uint8Array, mimeType: string): boolean {
+  if (mimeType !== "image/png") return false;
+  // PNG: 8-byte signature, then the IHDR chunk; colour type is the 25th byte overall.
+  if (bytes.length < 26) return false;
+  const colorType = bytes[25];
+  return colorType === 4 || colorType === 6; // grey+alpha, or RGBA
 }
 
 interface GltfSkin {
@@ -98,88 +112,81 @@ const TARGET_ELEMENT_ARRAY_BUFFER = 34963;
 
 // ── Binary buffer builder ────────────────────────────────────────────────────
 
+/// Appends straight into one growable byte buffer and records each view as an (offset, length)
+/// slice of it. Views are opened with `beginView` and closed by the next `beginView` or `build`.
+///
+/// Note this writes into a `Uint8Array`, not a `number[]`. A 15 MB model held as an array of
+/// boxed JS numbers costs well over 100 MB of transient heap on the API process, which is the
+/// difference between converting a dense MMD model and OOMing the container.
 class BufferBuilder {
-  private views: { data: Uint8Array; target?: number }[] = [];
-  private current: number[] = [];
-  private currentTarget: number | undefined;
-  private currentViewIdx = -1;
+  private bytes = new Uint8Array(1 << 16);
+  private len = 0;
+  private views: { start: number; end: number; target?: number }[] = [];
 
-  beginView(target?: number): number {
-    this.flush();
-    this.currentTarget = target;
-    this.currentViewIdx = this.views.length;
-    this.views.push({ data: new Uint8Array(0), target });
-    return this.currentViewIdx;
+  private reserve(n: number): void {
+    if (this.len + n <= this.bytes.length) return;
+    let cap = this.bytes.length;
+    while (cap < this.len + n) cap *= 2;
+    const grown = new Uint8Array(cap);
+    grown.set(this.bytes.subarray(0, this.len));
+    this.bytes = grown;
   }
+
+  /// Open a new view. Views are 4-byte aligned, as glTF requires for accessor-backed data.
+  beginView(target?: number): number {
+    this.padTo4();
+    const idx = this.views.length;
+    this.views.push({ start: this.len, end: this.len, target });
+    return idx;
+  }
+
+  private get view() { return this.views[this.views.length - 1]; }
 
   f32(v: number): void {
-    const buf = new ArrayBuffer(4);
-    new DataView(buf).setFloat32(0, v, true);
-    this.current.push(...new Uint8Array(buf));
-  }
-
-  u8(v: number): void {
-    this.current.push(v & 0xff);
+    this.reserve(4);
+    new DataView(this.bytes.buffer, this.len, 4).setFloat32(0, v, true);
+    this.len += 4;
+    if (this.views.length) this.view.end = this.len;
   }
 
   u16(v: number): void {
-    const buf = new ArrayBuffer(2);
-    new DataView(buf).setUint16(0, v, true);
-    this.current.push(...new Uint8Array(buf));
+    this.reserve(2);
+    new DataView(this.bytes.buffer, this.len, 2).setUint16(0, v, true);
+    this.len += 2;
+    if (this.views.length) this.view.end = this.len;
   }
 
   u32(v: number): void {
-    const buf = new ArrayBuffer(4);
-    new DataView(buf).setUint32(0, v, true);
-    this.current.push(...new Uint8Array(buf));
+    this.reserve(4);
+    new DataView(this.bytes.buffer, this.len, 4).setUint32(0, v, true);
+    this.len += 4;
+    if (this.views.length) this.view.end = this.len;
   }
 
-  i8(v: number): void {
-    this.current.push(v & 0xff);
+  raw(src: Uint8Array): void {
+    this.reserve(src.length);
+    this.bytes.set(src, this.len);
+    this.len += src.length;
+    if (this.views.length) this.view.end = this.len;
   }
 
-  raw(bytes: Uint8Array): void {
-    for (let i = 0; i < bytes.length; i++) this.current.push(bytes[i]);
-  }
-
+  /// Pad the *buffer* (not the current view) up to the next 4-byte boundary.
   padTo4(): void {
-    while (this.current.length % 4 !== 0) this.current.push(0);
-  }
-
-  flush(): void {
-    if (this.current.length > 0 && this.currentViewIdx >= 0) {
-      this.views[this.currentViewIdx] = {
-        data: new Uint8Array(this.current),
-        target: this.currentTarget,
-      };
-      this.current = [];
+    while (this.len % 4 !== 0) {
+      this.reserve(1);
+      this.bytes[this.len++] = 0;
     }
   }
 
   build(): { views: GltfBufferView[]; buffer: Uint8Array } {
-    this.flush();
-    const gltfViews: GltfBufferView[] = [];
-    let offset = 0;
-    const chunks: Uint8Array[] = [];
-    for (const v of this.views) {
-      // Align to 4 bytes
-      while (offset % 4 !== 0) { chunks.push(new Uint8Array([0])); offset++; }
-      gltfViews.push({
-        buffer: 0,
-        byteOffset: offset,
-        byteLength: v.data.length,
-        target: v.target,
-      });
-      chunks.push(v.data);
-      offset += v.data.length;
-    }
-    const buffer = new Uint8Array(offset);
-    let pos = 0;
-    for (const chunk of chunks) {
-      buffer.set(chunk, pos);
-      pos += chunk.length;
-    }
-    return { views: gltfViews, buffer };
+    this.padTo4();
+    const gltfViews: GltfBufferView[] = this.views.map(v => ({
+      buffer: 0,
+      byteOffset: v.start,
+      byteLength: v.end - v.start,
+      target: v.target,
+    }));
+    return { views: gltfViews, buffer: this.bytes.subarray(0, this.len) };
   }
 }
 
@@ -197,11 +204,16 @@ export function pmxToGlb(
   model: PMXModel,
   textureBytes?: Map<number, { bytes: Uint8Array; mimeType: string }>,
 ): PmxConvertResult {
+  // Everything positional — vertices, bone rest translations, inverse bind matrices — is baked
+  // into metres here rather than left to a scale on the root node, so downstream consumers
+  // (Godot's skeleton import, the web preview's auto-framing, the .ska height fields) all agree.
+  const s = pmxUnitScale(model);
   const buf = new BufferBuilder();
   const accessors: GltfAccessor[] = [];
   const materials: GltfMaterial[] = [];
   const textures: GltfTexture[] = [];
   const images: GltfImage[] = [];
+  const texIdxByPmxTexture = new Map<number, number>();
 
   // ── Build bone nodes first (they come before mesh nodes in the node array) ──
   const nodes: GltfNode[] = [];
@@ -223,13 +235,15 @@ export function pmxToGlb(
     // glTF node translation is relative to parent. PMX bone positions are world-space.
     // For root bones (no parent), use the world position directly.
     // For child bones, subtract parent's world position.
-    let translation: [number, number, number] = bone.position;
+    let translation: [number, number, number] = [
+      bone.position[0] * s, bone.position[1] * s, bone.position[2] * s,
+    ];
     if (bone.parentId >= 0 && bone.parentId < model.bones.length) {
       const parent = model.bones[bone.parentId];
       translation = [
-        bone.position[0] - parent.position[0],
-        bone.position[1] - parent.position[1],
-        bone.position[2] - parent.position[2],
+        (bone.position[0] - parent.position[0]) * s,
+        (bone.position[1] - parent.position[1]) * s,
+        (bone.position[2] - parent.position[2]) * s,
       ];
     }
     const node: GltfNode = {
@@ -289,7 +303,8 @@ export function pmxToGlb(
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (const vi of usedVerts) {
-      const p = model.vertices[vi].position;
+      const src = model.vertices[vi].position;
+      const p: [number, number, number] = [src[0] * s, src[1] * s, src[2] * s];
       buf.f32(p[0]); buf.f32(p[1]); buf.f32(p[2]);
       if (p[0] < minX) minX = p[0]; if (p[0] > maxX) maxX = p[0];
       if (p[1] < minY) minY = p[1]; if (p[1] > maxY) maxY = p[1];
@@ -381,39 +396,47 @@ export function pmxToGlb(
       type: "SCALAR",
     });
 
-    // Material
-    let matGltfIdx = -1;
-    if (matIdx < materials.length) matGltfIdx = matIdx;
-    else {
-      // Build material
-      const pbr: GltfMaterial["pbrMetallicRoughness"] = {
-        metallicFactor: 0,
-        roughnessFactor: 1,
-      };
-      // Set base color from diffuse
-      pbr.baseColorFactor = mat.diffuse;
-      // Texture
-      if (mat.textureIndex >= 0 && mat.textureIndex < model.textures.length) {
-        if (textureBytes && textureBytes.has(mat.textureIndex)) {
-          const tex = textureBytes.get(mat.textureIndex)!;
-          const imgView = buf.beginView();
-          buf.raw(tex.bytes);
-          buf.padTo4();
-          const imgIdx = images.length;
-          images.push({ bufferView: imgView, mimeType: tex.mimeType });
-          const texIdx = textures.length;
-          textures.push({ source: imgIdx });
-          pbr.baseColorTexture = { index: texIdx };
-        }
+    // Material. One glTF material per PMX material that actually draws something — never index
+    // `materials` by `matIdx`, because materials with no indices are skipped above and the two
+    // numbering schemes drift apart the moment that happens.
+    const pbr: GltfMaterial["pbrMetallicRoughness"] = {
+      metallicFactor: 0,
+      roughnessFactor: 1,
+      baseColorFactor: mat.diffuse,
+    };
+    let textureAlpha = false;
+    if (mat.textureIndex >= 0 && mat.textureIndex < model.textures.length) {
+      // Textures are shared between materials in MMD (hair and face often reuse one atlas), so
+      // embed each PMX texture once and reuse the glTF texture index.
+      let texIdx = texIdxByPmxTexture.get(mat.textureIndex);
+      const tex = textureBytes?.get(mat.textureIndex);
+      if (texIdx == null && tex) {
+        const imgView = buf.beginView();
+        buf.raw(tex.bytes);
+        buf.padTo4();
+        const imgIdx = images.length;
+        images.push({ bufferView: imgView, mimeType: tex.mimeType });
+        texIdx = textures.length;
+        textures.push({ source: imgIdx });
+        texIdxByPmxTexture.set(mat.textureIndex, texIdx);
       }
-      const gltfMat: GltfMaterial = {
-        name: mat.name || mat.nameEn || `Material_${matIdx}`,
-        pbrMetallicRoughness: pbr,
-        doubleSided: true, // MMD models are often double-sided
-      };
-      matGltfIdx = materials.length;
-      materials.push(gltfMat);
+      if (texIdx != null) pbr.baseColorTexture = { index: texIdx };
+      if (tex) textureAlpha = imageHasAlpha(tex.bytes, tex.mimeType);
     }
+
+    // MMD leans on alpha-cutout textures for hair strands, eyelashes and eyebrow overlays; with
+    // no alpha mode those render as opaque rectangles across the face. A translucent diffuse
+    // alpha means genuine blending; an alpha channel in the texture alone is a cutout.
+    const diffuseAlpha = mat.diffuse?.[3] ?? 1;
+    const alphaMode = diffuseAlpha < 1 ? "BLEND" : textureAlpha ? "MASK" : "OPAQUE";
+    const matGltfIdx = materials.length;
+    materials.push({
+      name: mat.name || mat.nameEn || `Material_${matIdx}`,
+      pbrMetallicRoughness: pbr,
+      doubleSided: true, // MMD models are often double-sided
+      alphaMode,
+      ...(alphaMode === "MASK" ? { alphaCutoff: 0.5 } : {}),
+    });
 
     primitives.push({
       attributes: {
@@ -443,7 +466,7 @@ export function pmxToGlb(
     buf.f32(1); buf.f32(0); buf.f32(0); buf.f32(0);
     buf.f32(0); buf.f32(1); buf.f32(0); buf.f32(0);
     buf.f32(0); buf.f32(0); buf.f32(1); buf.f32(0);
-    buf.f32(-bone.position[0]); buf.f32(-bone.position[1]); buf.f32(-bone.position[2]); buf.f32(1);
+    buf.f32(-bone.position[0] * s); buf.f32(-bone.position[1] * s); buf.f32(-bone.position[2] * s); buf.f32(1);
   }
   buf.padTo4();
   const ibmAcc = accessors.length;
@@ -489,10 +512,12 @@ export function pmxToGlb(
 
   const jsonStr = JSON.stringify(gltf);
   const jsonBytes = new TextEncoder().encode(jsonStr);
-  // Pad JSON to 4 bytes
-  const jsonPadded = jsonBytes.length % 4 === 0 ? jsonBytes : new Uint8Array(
-    Math.ceil(jsonBytes.length / 4) * 4,
-  );
+  // Pad the JSON chunk to 4 bytes with *spaces* (0x20), as glTF requires. Zero padding leaves
+  // trailing NULs inside the chunk, and strict parsers — including three.js/model-viewer — throw
+  // on them, so any model whose JSON length was not already a multiple of 4 produced an
+  // unloadable GLB.
+  const paddedLen = Math.ceil(jsonBytes.length / 4) * 4;
+  const jsonPadded = new Uint8Array(paddedLen).fill(0x20);
   jsonPadded.set(jsonBytes);
 
   // GLB structure: 12-byte header + JSON chunk + BIN chunk

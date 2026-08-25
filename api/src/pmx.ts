@@ -454,22 +454,32 @@ export function extractPMXHumanoid(model: PMXModel): Record<string, string> {
   return out;
 }
 
-/// Find the head bone's Y position (in meters) for height measurement.
-/// PMX bone positions are relative to the model origin (not accumulated up the chain).
-/// We normalize to meters using the model's bounding box height (assuming ~1.6m avatar).
-export function findHeadY(model: PMXModel, humanoid: Record<string, string>): number {
-  // Compute bounding box height from vertices
+/// Metres per PMX unit for this model.
+///
+/// MMD has no real unit convention — models are authored at roughly 12–13 units per metre, but it
+/// varies per model, so the only reliable normaliser is the model's own height. We take the
+/// vertex bounding box as "the avatar, head to toe" and divide by a nominal 1.6 m.
+///
+/// This scale must be applied to *geometry*, not just to the reported height: leaving the mesh in
+/// PMX units produced ~20 m tall avatars in-world and pushed the model far outside the web
+/// preview's camera framing, which read as "PMX avatars don't load".
+export function pmxUnitScale(model: PMXModel): number {
   let minY = Infinity, maxY = -Infinity;
   for (const v of model.vertices) {
     if (v.position[1] < minY) minY = v.position[1];
     if (v.position[1] > maxY) maxY = v.position[1];
   }
   const bboxHeight = maxY - minY;
-  const unitsPerMeter = bboxHeight / 1.6;
+  if (!Number.isFinite(bboxHeight) || bboxHeight <= 0) return 1;
+  return 1.6 / bboxHeight;
+}
 
+/// Find the head bone's Y position in metres, for height measurement.
+/// PMX bone positions are world-space relative to the model origin (not accumulated up the chain).
+export function findHeadY(model: PMXModel, humanoid: Record<string, string>): number {
   const headName = humanoid.head;
   if (!headName) return 1.4;
   const bone = model.bones.find(b => b.name === headName);
   if (!bone) return 1.4;
-  return bone.position[1] / unitsPerMeter;
+  return bone.position[1] * pmxUnitScale(model);
 }
