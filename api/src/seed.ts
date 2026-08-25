@@ -102,6 +102,7 @@ async function main() {
     { id: "00000000-0000-0000-0000-0000000000e8", name: "Test: Sphere Garden", description: "Thirty scattered spheres plus three big translucent ones. Tests curved collision, transparency and sorting.", tags: ["test", "debug"], capacity: 16, heat: 100 },
     { id: "00000000-0000-0000-0000-0000000000e9", name: "Backrooms", description: "You noclipped out of reality. Endless mono-yellow hallways, damp moquette, the maddening 120Hz hum of fluorescent lights. 5+ million faithful triangles of pure liminal dread. Don't stop moving.", tags: ["maze", "horror", "liminal"], capacity: 24, heat: 900 },
     { id: "00000000-0000-0000-0000-0000000000ea", name: "Gryffindor Common Room", description: "The cosiest room in the castle. A roaring fireplace, scarlet-and-gold everything, squashy armchairs, tapestries and a spiral stair to the dorms. Fully modelled, fully textured. Pull up a chair.", tags: ["hogwarts", "social", "cozy"], capacity: 24, heat: 850 },
+    { id: "00000000-0000-0000-0000-0000000000ec", name: "Test: Items Lab", description: "A test room for usable items and interaction parity: marker pens on tables, physics props to grab and throw, a large drawing wall, and a 1.8m reference post. Pick up a pen and draw!", tags: ["test", "debug", "items"], capacity: 16, heat: 100 },
   ];
 
   for (const w of communityWorlds) {

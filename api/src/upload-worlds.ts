@@ -137,6 +137,15 @@ const WORLDS: WorldSpec[] = [
     capacity: 24,
     heat: 850,
   },
+  {
+    worldId: "00000000-0000-0000-0000-0000000000ec",
+    name: "Test: Items Lab",
+    description:
+      "A test room for usable items and interaction parity: marker pens on tables, physics props to grab and throw, a large drawing wall, and a 1.8m reference post. Pick up a pen and draw!",
+    tags: ["test", "debug", "items"],
+    capacity: 16,
+    heat: 100,
+  },
 ];
 
 /** Locate the pre-built `.serikaworld`; build the whole set via Blender if it is missing. */
