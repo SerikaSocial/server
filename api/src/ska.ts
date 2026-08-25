@@ -37,11 +37,12 @@ export interface SkaMeta {
   humanoid: Record<string, string>;
 }
 
-export type UploadKind = "vrm" | "glb" | "fbx" | "pmx" | "unknown";
+export type UploadKind = "vrm" | "glb" | "fbx" | "pmx" | "unitypackage" | "unknown";
 
-/// Sniff the uploaded bytes. FBX has a distinctive ASCII header; VRM/GLB share the glTF magic
-/// (we tell them apart by the VRM extension after parsing JSON). PMX starts with "PMX ".
-export function sniffKind(bytes: Uint8Array): UploadKind {
+/// Sniff the uploaded bytes. FBX has a distinctive ASCII header; VRM/GLB share the glTF magic;
+/// PMX starts with "PMX "; unitypackage is a gzip tar archive (0x1F 0x8B).
+export function sniffKind(bytes: Uint8Array, filename?: string): UploadKind {
+  if (filename && filename.toLowerCase().endsWith(".unitypackage")) return "unitypackage";
   if (bytes.length >= 4) {
     const magic = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
     if (magic === GLB_MAGIC) return "glb"; // may be VRM; refined during parse
@@ -50,6 +51,10 @@ export function sniffKind(bytes: Uint8Array): UploadKind {
   if (bytes.length >= 4) {
     const head = new TextDecoder("ascii").decode(bytes.subarray(0, 4));
     if (head === "PMX ") return "pmx";
+  }
+  // Gzip magic (unitypackage is tar.gz)
+  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    return "unitypackage";
   }
   // Binary FBX starts with "Kaydara FBX Binary  ".
   const head = new TextDecoder("latin1").decode(bytes.subarray(0, 20));

@@ -263,17 +263,59 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
         }
       }
 
-      const kind = sniffKind(modelBytes);
+      const kind = sniffKind(modelBytes, file.name);
       if (kind === "fbx") {
         set.status = 415;
         return { error: "fbx_not_supported", detail: "FBX upload needs conversion to glTF first. Export your rig as VRM or GLB and re-upload." };
       }
       if (kind === "unknown") {
         set.status = 415;
-        return { error: "unsupported_format", detail: "Upload a VRM, GLB, PMX, or a zip containing a PMX + textures." };
+        return { error: "unsupported_format", detail: "Upload a VRM, GLB, PMX, unitypackage, or a zip containing a PMX + textures." };
       }
 
       let result;
+      if (kind === "unitypackage") {
+        // Store unitypackage raw asset
+        const hash = await sha256Hex(modelBytes);
+        const pkgKey = `av/pkg/${hash.slice(0, 2)}/${hash}.unitypackage`;
+        await putBytes(pkgKey, modelBytes, "application/octet-stream");
+
+        let thumbnailKey: string | null = null;
+        const thumbFile = body.thumbnail as File | undefined;
+        if (thumbFile) {
+          const thumbBytes = new Uint8Array(await thumbFile.arrayBuffer());
+          const thumbHash = await sha256Hex(thumbBytes);
+          const thumbExt = (thumbFile.type === "image/jpeg" ? "jpg" : "png");
+          thumbnailKey = `av/thumb/${thumbHash.slice(0, 2)}/${thumbHash}.${thumbExt}`;
+          await putBytes(thumbnailKey, thumbBytes, thumbFile.type || "image/png");
+        }
+
+        const avatar = await prisma.avatar.create({
+          data: {
+            authorId: session.sub,
+            name: body.name || file.name.replace(/\.unitypackage$/i, ""),
+            sourceFormat: 5, // unitypackage
+            releaseStatus: 0,
+            thumbnailKey,
+            versions: {
+              create: {
+                version: 1,
+                cdnKey: pkgKey,
+                blake3: Buffer.from(hash, "hex"),
+                stats: { sizeBytes: modelBytes.length },
+              },
+            },
+          },
+          include: withVersion,
+        });
+        await prisma.avatar.update({
+          where: { id: avatar.id },
+          data: { publishedVersionId: avatar.versions[0].id },
+        });
+
+        return { avatar: serialize(avatar) };
+      }
+
       try {
         result = kind === "pmx"
           ? pmxToSka(modelBytes, { name: body.name }, pmxTextureBytes)
