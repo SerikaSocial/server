@@ -9,7 +9,7 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 ca-certificates curl xz-utils \
     && curl -sSL https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz \
-       | tar -xJ --strip-components=1 -C /usr/local/bin/ ffmpeg ffprobe \
+       | tar -xJ --strip-components=1 --wildcards -C /usr/local/bin/ '*/ffmpeg' '*/ffprobe' \
     && curl -sL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
     && chmod a+rx /usr/local/bin/yt-dlp \
     && apt-get purge -y --auto-remove xz-utils \
