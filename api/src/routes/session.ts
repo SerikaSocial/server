@@ -43,6 +43,7 @@ export const sessionRoutes = new Elysia({ prefix: "/v1/session" })
 
       return {
         session_token: session,
+        accounts_token: token.access_token,
         user: {
           id: user.id,
           username: user.username,
@@ -89,6 +90,7 @@ export const sessionRoutes = new Elysia({ prefix: "/v1/session" })
 
       return {
         session_token: session,
+        accounts_token: login.token,
         user: {
           id: user.id,
           username: user.username,
