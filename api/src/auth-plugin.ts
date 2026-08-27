@@ -16,10 +16,14 @@ export const authed = new Elysia({ name: "authed" }).derive(
     }
     try {
       const session = await verifySession(token);
+      if (!session || typeof session.sub !== "string" || !session.sub) {
+        set.status = 401;
+        throw new Error("invalid session token");
+      }
       return { session };
-    } catch {
+    } catch (e) {
       set.status = 401;
-      throw new Error("invalid session token");
+      throw new Error(e instanceof Error ? e.message : "invalid session token");
     }
   },
 );
@@ -29,6 +33,10 @@ export const authed = new Elysia({ name: "authed" }).derive(
 export const adminOnly = new Elysia({ name: "adminOnly" }).use(authed).derive(
   { as: "scoped" },
   async ({ session, set }): Promise<{ admin: SessionClaims }> => {
+    if (!session || typeof session.sub !== "string" || !session.sub) {
+      set.status = 401;
+      throw new Error("invalid session token");
+    }
     const user = await prisma.user.findUnique({ where: { id: session.sub }, select: { isAdmin: true } });
     if (!user?.isAdmin) {
       set.status = 403;

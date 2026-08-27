@@ -63,6 +63,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
   .post(
     "/",
     async ({ body, session, set }) => {
+      if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
       const world = await prisma.world.findUnique({ where: { id: body.worldId } });
       if (!world) {
         set.status = 404;
@@ -122,6 +123,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
   .post(
     "/join-world",
     async ({ body, session, set }) => {
+      if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
       const world = await prisma.world.findUnique({ where: { id: body.worldId } });
       if (!world) {
         set.status = 404;
@@ -187,6 +189,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
 
   // Join an existing open instance: returns a ticket if there's room.
   .post("/:id/join", async ({ params, session, set }) => {
+    if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
     const instance = await prisma.instance.findUnique({ where: { id: params.id } });
     if (!instance || instance.closedAt) {
       set.status = 404;
@@ -223,6 +226,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
   .post(
     "/:id/close",
     async ({ params, session, set }) => {
+      if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
       const instance = await prisma.instance.findUnique({ where: { id: params.id } });
       if (!instance || instance.closedAt) {
         set.status = 404;

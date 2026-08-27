@@ -22,6 +22,9 @@ export async function signSession(claims: SessionClaims): Promise<string> {
 
 export async function verifySession(token: string): Promise<SessionClaims> {
   const { payload } = await jwtVerify(token, sessionKey, { issuer: "serika-social" });
+  if (typeof payload.sub !== "string" || !payload.sub) {
+    throw new Error("session token missing subject");
+  }
   return payload as unknown as SessionClaims;
 }
 
