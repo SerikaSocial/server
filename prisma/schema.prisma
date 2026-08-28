@@ -36,10 +36,13 @@ model User {
   friendsB        Friend[]  @relation("FriendB")
   following       Follow[]  @relation("Follower")
   followers       Follow[]  @relation("Followed")
-  blocks          Block[]   @relation("BlockUser")
-  blockedBy       Block[]   @relation("BlockBlocked")
+  blocks          Block[]  @relation("BlockUser")
+  blockedBy       Block[]  @relation("BlockBlocked")
   favorites       Favorite[]
   reviews         Review[]
+  reportsFiled    Report[] @relation("ReportReporter")
+  reportsAgainst  Report[] @relation("ReportTargetUser")
+  reportsResolved Report[] @relation("ReportResolver")
 
   @@index([lastSeen(sort: Desc)])
   @@map("users")
@@ -113,6 +116,7 @@ model World {
   versions  WorldVersion[]
   instances Instance[]
   reviews   Review[]
+  reports   Report[] @relation("ReportTargetWorld")
 
   @@index([tags], type: Gin)
   @@index([heat(sort: Desc)])
@@ -306,4 +310,39 @@ model ModerationAction {
 
   @@index([targetId])
   @@map("moderation_actions")
+}
+
+/// A user-submitted abuse report against a user or a world. Exactly one of
+/// targetUserId / targetWorldId is set, keyed by targetType. Reports are immutable once
+/// filed; resolution writes status/notes/resolvedBy. See api/src/routes/reports.ts.
+model Report {
+  id            String    @id @default(uuid()) @db.Uuid
+  reporterId    String    @map("reporter_id") @db.Uuid
+  /// 0=user 1=world
+  targetType    Int       @map("target_type")
+  targetUserId  String?   @map("target_user_id") @db.Uuid
+  targetWorldId String?   @map("target_world_id") @db.Uuid
+  /// 0=harassment 1=hate_speech 2=sexual_content 3=violence_gore 4=spam_scam
+  /// 5=impersonation 6=cheating 7=inappropriate_content 8=other
+  category      Int
+  details       String    @default("")
+  /// Where the reporter was when they filed (context for moderators); optional.
+  instanceId    String?   @map("instance_id") @db.Uuid
+  /// 0=open 1=actioned 2=dismissed
+  status        Int       @default(0)
+  resolvedById  String?   @map("resolved_by_id") @db.Uuid
+  resolutionNotes String  @default("") @map("resolution_notes")
+  resolvedAt    DateTime? @map("resolved_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  reporter    User  @relation("ReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  targetUser  User? @relation("ReportTargetUser", fields: [targetUserId], references: [id], onDelete: Cascade)
+  targetWorld World? @relation("ReportTargetWorld", fields: [targetWorldId], references: [id], onDelete: Cascade)
+  resolvedBy  User? @relation("ReportResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([reporterId, status])
+  @@index([targetUserId])
+  @@index([targetWorldId])
+  @@map("reports")
 }

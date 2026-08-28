@@ -99,7 +99,7 @@ export const publicUserRoutes = new Elysia({ prefix: "/v1/users" })
 /// Authed user profile routes — follow status, block status, etc.
 export const authedUserRoutes = new Elysia({ prefix: "/v1/users" })
   .use(authed)
-  // Check if I follow / block a specific user (for profile page button state).
+  // Check if I follow / block / friend a specific user (for profile page button state).
   .get(
     "/:username/relationship",
     async ({ session, params, set }) => {
@@ -108,18 +108,25 @@ export const authedUserRoutes = new Elysia({ prefix: "/v1/users" })
         set.status = 404;
         return { error: "user_not_found" };
       }
-      const [following, blocked] = await Promise.all([
+      // Friend rows are keyed with userA < userB — sort the pair before looking up.
+      const [a, b] = [session.sub, target.id].sort();
+      const [following, blocked, friend] = await Promise.all([
         prisma.follow.findUnique({
           where: { followerId_followedId: { followerId: session.sub, followedId: target.id } },
         }),
         prisma.block.findUnique({
           where: { userId_blockedId: { userId: session.sub, blockedId: target.id } },
         }),
+        prisma.friend.findUnique({ where: { userAId_userBId: { userAId: a, userBId: b } } }),
       ]);
       return {
         following: !!following,
         blocked: !!blocked,
         isSelf: target.id === session.sub,
+        friend: friend?.status === 1,
+        // They sent the request (awaiting MY accept) vs I sent it (awaiting THEIRS).
+        incomingRequest: friend?.status === 0 && friend.requestedById !== session.sub,
+        outgoingRequest: friend?.status === 0 && friend.requestedById === session.sub,
       };
     },
     { params: t.Object({ username: t.String() }) },
