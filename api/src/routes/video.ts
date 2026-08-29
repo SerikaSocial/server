@@ -155,7 +155,7 @@ function runYtDlp(url: string): Promise<any> {
       "--user-agent", BROWSER_UA,
       // Datacenter IPs get YouTube's "sign in to confirm you're not a bot". The android
       // / tv_embedded clients skip that gate; without them every resolve 422s.
-      "--extractor-args", "youtube:player_client=android,tv_embedded,web",
+      "--extractor-args", "youtube:player_client=android,ios,tv_embedded,web",
     ];
 
     // Bilibili's WAF rejects anonymous datacenter traffic (HTTP 412) unless the request
