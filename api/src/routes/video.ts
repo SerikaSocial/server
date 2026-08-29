@@ -1,6 +1,8 @@
 import { Elysia, t } from "elysia";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import { redis } from "../db.ts";
 import { authed } from "../auth-plugin.ts";
 
@@ -29,6 +31,229 @@ const MAX_CONCURRENT_TRANSCODES = Number(process.env.MAX_CONCURRENT_TRANSCODES ?
 const SERVER_ENCODE_THREADS = Number(process.env.VIDEO_ENCODE_THREADS ?? 2);
 const SERVER_MAX_HEIGHT = Number(process.env.VIDEO_MAX_HEIGHT ?? 480);
 let activeTranscodes = 0;
+
+// ── Shared segmented transcode ────────────────────────────────────────────────────────
+//
+// The `/transcode` endpoint below streams one continuous ogg per request, which has three
+// properties that make it unusable as the *primary* path, and which together are why Quest
+// had no video at all:
+//
+//   1. The client cannot play until the whole file has arrived, because Godot's
+//      VideoStreamPlayer opens a path through FileAccess — it does not stream. So
+//      time-to-first-frame is the entire clip's encode, and the 120 s watchdog SIGKILLs
+//      anything longer than about two minutes of encoding first.
+//   2. One request is one ffmpeg. With MAX_CONCURRENT_TRANSCODES at 1, the second person in
+//      the cinema gets a 503.
+//   3. Nothing is cached, so ten people watching one film is ten identical encodes.
+//
+// A *job* fixes all three and is what makes "only one person needs to encode" true. The job
+// is keyed by the source URL and the encode settings, so everyone watching the same thing
+// attaches to the same ffmpeg and reads the same segments off disk; the first viewer pays for
+// the encode and everyone after is served from cache. ffmpeg writes short self-contained ogg
+// segments (`-f segment`), so playback starts one segment in rather than one clip in, and the
+// client feeds them to the screen with the same `AppendSegment` playlist machinery the desktop
+// local-ffmpeg path already uses.
+const JOB_ROOT = process.env.VIDEO_JOB_DIR ?? "/tmp/serika-video";
+/// How long a finished job's segments stay on disk after the last request touches them. This
+/// is the entire "shared encode" win — set it to zero and every viewer re-encodes.
+const JOB_TTL_MS = Number(process.env.VIDEO_JOB_TTL_MS ?? 30 * 60 * 1000);
+/// Segment length. Dominates time-to-first-frame, so short; but each one is a separate ogg
+/// header plus an HTTP round trip, so not tiny.
+const JOB_SEGMENT_SECONDS = Number(process.env.VIDEO_SEGMENT_SECONDS ?? 6);
+/// Total bytes of cached segments tolerated before the reaper starts evicting the
+/// least-recently-used finished jobs, whatever their TTL.
+const JOB_CACHE_MAX_BYTES = Number(process.env.VIDEO_CACHE_MAX_BYTES ?? 4 * 1024 * 1024 * 1024);
+
+interface TranscodeJob {
+  id: string;
+  dir: string;
+  proc: ReturnType<typeof spawn> | null;
+  /** Encoder has exited; the segment list is final. */
+  done: boolean;
+  error: string | null;
+  title: string | null;
+  duration: number | null;
+  lastAccess: number;
+  /** Resolves once ffmpeg has been spawned (or failed to start). */
+  starting: Promise<void> | null;
+}
+
+const jobs = new Map<string, TranscodeJob>();
+
+function jobKey(url: string): string {
+  return createHash("sha256")
+    .update(`${url}|h=${SERVER_MAX_HEIGHT}|s=${JOB_SEGMENT_SECONDS}|v1`)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/// Number of segments that are safe to hand out.
+///
+/// ffmpeg is still writing the highest-numbered segment, so it is a truncated ogg until the
+/// next one appears — serving it gives the client a corrupt file and a decoder error that
+/// looks exactly like "the transcode is broken". A segment is therefore complete only once a
+/// later one exists, or once the encoder has exited.
+async function completeSegments(job: TranscodeJob): Promise<number> {
+  let names: string[];
+  try {
+    names = await readdir(job.dir);
+  } catch {
+    return 0;
+  }
+  const count = names.filter(n => /^seg_\d+\.ogv$/.test(n)).length;
+  if (count === 0) return 0;
+  return job.done ? count : count - 1;
+}
+
+async function startJob(url: string): Promise<TranscodeJob> {
+  const id = jobKey(url);
+  const existing = jobs.get(id);
+  if (existing) {
+    existing.lastAccess = Date.now();
+    return existing;
+  }
+
+  const job: TranscodeJob = {
+    id,
+    dir: `${JOB_ROOT}/${id}`,
+    proc: null,
+    done: false,
+    error: null,
+    title: null,
+    duration: null,
+    lastAccess: Date.now(),
+    starting: null,
+  };
+  // Registered before the async work so a second viewer arriving mid-resolve attaches to this
+  // job rather than starting a duplicate encode of the same film — which is the exact race
+  // that "everyone presses play at once" produces.
+  jobs.set(id, job);
+
+  job.starting = (async () => {
+    try {
+      await mkdir(job.dir, { recursive: true });
+      const resolved = await resolveVideo(url);
+      job.title = resolved.title ?? null;
+      job.duration = resolved.duration ?? null;
+
+      const track = resolved.tracks.find(t => (t.height ?? 0) <= SERVER_MAX_HEIGHT)
+        ?? resolved.tracks.find(t => (t.height ?? 0) <= 720)
+        ?? resolved.tracks[0];
+      if (!track) throw new Error("no_playable_streams");
+
+      const args: string[] = ["-y", "-threads", String(SERVER_ENCODE_THREADS)];
+      if (resolved.headers["User-Agent"]) args.push("-user_agent", resolved.headers["User-Agent"]);
+      if (resolved.headers.Referer) args.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
+      args.push("-i", track.url);
+
+      const separateAudio = !track.hasAudio && Boolean(resolved.audioUrl);
+      if (separateAudio && resolved.audioUrl) {
+        if (resolved.headers["User-Agent"]) args.push("-user_agent", resolved.headers["User-Agent"]);
+        if (resolved.headers.Referer) args.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
+        args.push("-i", resolved.audioUrl);
+      }
+      args.push("-map", separateAudio ? "0:v:0" : "0:v:0", "-map", separateAudio ? "1:a:0?" : "0:a:0?");
+
+      args.push(
+        "-vf", `scale=-2:min(${SERVER_MAX_HEIGHT}\\,ih)`,
+        "-pix_fmt", "yuv420p",
+        "-c:v", "libtheora", "-q:v", "5", "-threads", String(SERVER_ENCODE_THREADS),
+        "-c:a", "libvorbis", "-q:a", "4",
+        "-shortest",
+        // Self-contained ogg chunks. `-reset_timestamps` makes each one start at zero, which is
+        // what lets the client hand them to the player as independent clips.
+        "-f", "segment",
+        "-segment_time", String(JOB_SEGMENT_SECONDS),
+        "-segment_format", "ogg",
+        "-reset_timestamps", "1",
+        `${job.dir}/seg_%04d.ogv`,
+      );
+
+      // stderr is piped and *drained* into a small ring buffer. Discarding it entirely (what
+      // /transcode does) means a failed encode is indistinguishable from an empty one: the job
+      // reports `done` with zero segments and the player shows a black screen with no reason
+      // anywhere. Draining is what makes piping safe — an unread pipe fills its 64 KB kernel
+      // buffer and wedges ffmpeg mid-write, which is the trap /transcode avoids by ignoring it.
+      const ff = spawn(process.env.FFMPEG_PATH ?? "ffmpeg", args, {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      job.proc = ff;
+      activeTranscodes++;
+
+      let tail = "";
+      ff.stderr?.on("data", (chunk: Buffer) => {
+        tail = (tail + chunk.toString("utf8")).slice(-4096);
+      });
+
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        activeTranscodes--;
+        job.done = true;
+        job.proc = null;
+      };
+      ff.on("error", (e) => { job.error = e instanceof Error ? e.message : String(e); release(); });
+      ff.on("close", async (code) => {
+        // Mark done *before* counting: `completeSegments` withholds the last segment while the
+        // encoder is still running, so counting first would report 0 for a job that produced
+        // exactly one segment and flag a good clip as a failure.
+        job.done = true;
+        // A non-zero exit having produced nothing is a real failure worth reporting. A non-zero
+        // exit *after* segments exist is usually the viewer cancelling or the source ending
+        // untidily, and the segments are still good — reporting that as an error would throw
+        // away a perfectly playable clip.
+        if (code !== 0 && (await completeSegments(job).catch(() => 0)) === 0) {
+          const lines = tail.trim().split("\n").filter(l => /error|failed|invalid|denied|404|403/i.test(l));
+          job.error = `ffmpeg_failed: ${(lines.at(-1) ?? `exit ${code}`).slice(0, 300)}`;
+        }
+        release();
+      });
+    } catch (e) {
+      job.error = e instanceof Error ? e.message : String(e);
+      job.done = true;
+    }
+  })();
+
+  return job;
+}
+
+/// Drop jobs whose segments nobody has asked for in a while, and evict the oldest finished
+/// ones if the cache has outgrown its disk budget. A running encode is never evicted.
+async function reapJobs(): Promise<void> {
+  const now = Date.now();
+  const finished: { job: TranscodeJob; bytes: number }[] = [];
+  let total = 0;
+
+  for (const job of [...jobs.values()]) {
+    if (job.proc) continue; // still encoding — leave it alone
+    let bytes = 0;
+    try {
+      for (const name of await readdir(job.dir)) {
+        bytes += (await stat(`${job.dir}/${name}`)).size;
+      }
+    } catch { /* directory already gone */ }
+
+    if (now - job.lastAccess > JOB_TTL_MS) {
+      jobs.delete(job.id);
+      await rm(job.dir, { recursive: true, force: true }).catch(() => {});
+      continue;
+    }
+    total += bytes;
+    finished.push({ job, bytes });
+  }
+
+  if (total <= JOB_CACHE_MAX_BYTES) return;
+  finished.sort((a, b) => a.job.lastAccess - b.job.lastAccess);
+  for (const { job, bytes } of finished) {
+    if (total <= JOB_CACHE_MAX_BYTES) break;
+    jobs.delete(job.id);
+    await rm(job.dir, { recursive: true, force: true }).catch(() => {});
+    total -= bytes;
+  }
+}
+
+setInterval(() => { void reapJobs(); }, 60_000).unref?.();
 
 export type Protocol = "progressive" | "hls" | "dash";
 
@@ -298,6 +523,80 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
       }
     },
     { query: t.Object({ url: t.String() }) },
+  )
+  .get(
+    "/session",
+    async ({ query, set }) => {
+      // Start (or attach to) a shared segmented transcode and report its progress. Polled by
+      // the client while it plays: `segments` is how many are safe to fetch, `done` says the
+      // encoder has finished so the count is final.
+      //
+      // This is the path Quest uses for everything, and the path any client uses when it has
+      // no local ffmpeg. It is deliberately not gated on platform: a second desktop viewer of
+      // a film someone already queued should also read the cache rather than re-encode.
+      const url = (query.url ?? "").trim();
+      if (!url) { set.status = 400; return { error: "missing_url" }; }
+
+      try {
+        const existing = jobs.get(jobKey(url));
+        // The concurrency cap now limits *distinct* encodes, not viewers — attaching to a job
+        // that already exists costs nothing, so it must never be refused.
+        if (!existing && activeTranscodes >= MAX_CONCURRENT_TRANSCODES) {
+          set.status = 503;
+          return { error: "transcode_busy" };
+        }
+
+        const job = await startJob(url);
+        await job.starting;
+        job.lastAccess = Date.now();
+
+        if (job.error) {
+          set.status = job.error === "no_playable_streams" ? 422 : 500;
+          return { error: job.error };
+        }
+        return {
+          id: job.id,
+          segments: await completeSegments(job),
+          done: job.done,
+          segmentSeconds: JOB_SEGMENT_SECONDS,
+          title: job.title,
+          duration: job.duration,
+        };
+      } catch (e) {
+        set.status = 500;
+        return { error: e instanceof Error ? e.message : String(e) };
+      }
+    },
+    { query: t.Object({ url: t.String() }) },
+  )
+  .get(
+    "/segment/:id/:n",
+    async ({ params, set }) => {
+      // Serve one finished segment. Segments are immutable once complete, so they cache hard —
+      // which matters when a roomful of people are a few seconds apart in the same film.
+      const job = jobs.get(params.id);
+      if (!job) { set.status = 404; return { error: "unknown_job" }; }
+      job.lastAccess = Date.now();
+
+      const n = Number(params.n);
+      if (!Number.isInteger(n) || n < 0) { set.status = 400; return { error: "bad_segment" }; }
+      if (n >= await completeSegments(job)) {
+        // Not an error: the encoder simply has not got there yet. 425 tells the client to
+        // keep polling rather than treat the clip as broken and skip to the next one.
+        set.status = 425;
+        return { error: "not_ready" };
+      }
+
+      const file = Bun.file(`${job.dir}/seg_${String(n).padStart(4, "0")}.ogv`);
+      if (!(await file.exists())) { set.status = 404; return { error: "missing_segment" }; }
+      return new Response(file, {
+        headers: {
+          "content-type": "video/ogg",
+          "cache-control": "public, max-age=86400, immutable",
+        },
+      });
+    },
+    { params: t.Object({ id: t.String(), n: t.String() }) },
   )
   .get(
     "/transcode",

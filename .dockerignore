@@ -6,3 +6,11 @@ dist
 .env
 .env.*
 *.log
+
+# The Rust build directory — 1.2 GB of relay build artefacts, and by far the largest thing in
+# this build context. It was landing whole in the `COPY . .` layer of the JS images, which do
+# not contain or use a single byte of it: it made up 1.17 GB of a 2.2 GB API image. This is
+# also what made the image "too large to export" and prompted the static-ffmpeg workaround
+# that broke server-side transcoding (see api/Dockerfile).
+target
+instanced/target
