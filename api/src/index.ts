@@ -16,6 +16,7 @@ import { adminReviewRoutes } from "./routes/admin-review.ts";
 import { adminSystemRoutes } from "./routes/admin-system.ts";
 import { reportRoutes, adminReportRoutes } from "./routes/reports.ts";
 import { publicUserRoutes, authedUserRoutes } from "./routes/users.ts";
+import { notificationRoutes } from "./routes/notifications.ts";
 import { startInstanceSweep } from "./routes/instances.ts";
 
 const app = new Elysia()
@@ -49,6 +50,7 @@ const app = new Elysia()
   .use(reviewRoutes)
   .use(publicUserRoutes)
   .use(authedUserRoutes)
+  .use(notificationRoutes)
   .onError(({ code, error, set }) => {
     // Elysia surfaces our thrown auth errors here; keep 401s as 401s, everything else 500.
     if (set.status === 401 || set.status === 403) return { error: String(error instanceof Error ? error.message : error) };

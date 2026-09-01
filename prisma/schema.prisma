@@ -43,9 +43,42 @@ model User {
   reportsFiled    Report[] @relation("ReportReporter")
   reportsAgainst  Report[] @relation("ReportTargetUser")
   reportsResolved Report[] @relation("ReportResolver")
+  notifications      Notification[] @relation("NotificationUser")
+  notificationsCaused Notification[] @relation("NotificationActor")
 
   @@index([lastSeen(sort: Desc)])
   @@map("users")
+}
+
+/// A durable per-user notification. Gateway push is best-effort and only reaches a user who
+/// happens to be connected, so this table — not the socket — is the source of truth: an invite
+/// or friend request sent while the recipient is offline is still here when they come back.
+model Notification {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  /// friend_request | friend_accepted | invite | world_review | system
+  kind      String
+  /// Who caused it, when a person is behind it. SetNull so deleting an account keeps history.
+  actorId   String?   @map("actor_id") @db.Uuid
+  title     String
+  body      String    @default("")
+  /// Where tapping it goes — a `serikasocial://` deep link or a web route.
+  link      String?
+  /// Kind-specific extras (worldId, instanceId, …). Read defensively; shape varies by kind.
+  data      Json?
+  /// Invites go stale — a join that is hours old is worse than no button at all.
+  expiresAt DateTime? @map("expires_at")
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user  User  @relation("NotificationUser", fields: [userId], references: [id], onDelete: Cascade)
+  actor User? @relation("NotificationActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  /// The unread-badge query.
+  @@index([userId, readAt])
+  /// The list query.
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("notifications")
 }
 
 /// 0=pending 1=accepted (a single row per pair, userA < userB by id).

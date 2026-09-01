@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 import { authed } from "../auth-plugin.ts";
 import { prisma, redis, keys } from "../db.ts";
+import { notify } from "../notify.ts";
 
 /// Friends, blocks, and social surface. M7.
 export const friendRoutes = new Elysia({ prefix: "/v1/social" })
@@ -96,14 +97,24 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
         data: { userAId: a, userBId: b, requestedById: session.sub, status: 0 },
       });
 
-      // Push notification to the target via gateway.
+      // Durable notification + live push. This used to be a bare `redis.publish`, which reached
+      // the target only if they happened to be connected at that instant — a friend request sent
+      // to an offline user vanished with no trace anywhere.
       try {
-        const { username } = (await prisma.user.findUnique({ where: { id: session.sub }, select: { username: true } }))!;
-        await redis.publish(`gwpush:${target.id}`, JSON.stringify({
-          type: "friend_request",
-          from: { id: session.sub, username },
-        }));
-      } catch { /* push is best-effort */ }
+        const me = await prisma.user.findUnique({
+          where: { id: session.sub },
+          select: { username: true, displayName: true },
+        });
+        const who = me?.displayName || me?.username || "Someone";
+        await notify({
+          userId: target.id,
+          kind: "friend_request",
+          actorId: session.sub,
+          title: "Friend request",
+          body: `${who} wants to be friends.`,
+          data: { userId: session.sub, username: me?.username },
+        });
+      } catch (e) { console.error("[social] friend_request notify failed", e); }
 
       return { status: "pending" };
     },
@@ -124,6 +135,25 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
         where: { userAId_userBId: { userAId: a, userBId: b } },
         data: { status: 1 },
       });
+
+      // Tell the requester their request landed — otherwise the only way to find out is to
+      // notice the person has silently appeared in your friends list.
+      try {
+        const me = await prisma.user.findUnique({
+          where: { id: session.sub },
+          select: { username: true, displayName: true },
+        });
+        const who = me?.displayName || me?.username || "Someone";
+        await notify({
+          userId: params.userId,
+          kind: "friend_accepted",
+          actorId: session.sub,
+          title: "Friend request accepted",
+          body: `${who} accepted your friend request.`,
+          data: { userId: session.sub, username: me?.username },
+        });
+      } catch (e) { console.error("[social] friend_accepted notify failed", e); }
+
       return { status: "accepted" };
     },
     { params: t.Object({ userId: t.String() }) },
@@ -292,4 +322,118 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
       return { status: "removed" };
     },
     { params: t.Object({ kind: t.String(), targetId: t.String() }) },
+  )
+
+  // ── Invites ────────────────────────────────────────────────────────────
+  //
+  // There was no invite endpoint at all before this. The gateway had `/internal/invite` and the
+  // client had a "Copy invite link" button that put a deep link on the clipboard — but nothing
+  // ever called the gateway, and no route existed for one user to invite another. "Inviting to a
+  // world doesn't work" was not a bug in the delivery path; the feature had no server half.
+
+  /// Invite someone to the instance you are currently in.
+  ///
+  /// Who may invite whom is deliberately narrow: friends, or someone who is in the same instance
+  /// as you right now. An open invite endpoint is a spam vector aimed at a modal dialog, and the
+  /// server is the only place that can enforce it.
+  .post(
+    "/invite",
+    async ({ session, body, set }) => {
+      if (body.targetUserId === session.sub) {
+        set.status = 400;
+        return { error: "cannot_invite_self" };
+      }
+
+      const target = await prisma.user.findUnique({
+        where: { id: body.targetUserId },
+        select: { id: true, username: true },
+      });
+      if (!target) {
+        set.status = 404;
+        return { error: "user_not_found" };
+      }
+
+      // Blocks are mutual and checked in both directions.
+      const blocked = await prisma.block.findFirst({
+        where: {
+          OR: [
+            { userId: session.sub, blockedId: target.id },
+            { userId: target.id, blockedId: session.sub },
+          ],
+        },
+      });
+      if (blocked) {
+        set.status = 403;
+        return { error: "blocked" };
+      }
+
+      // Rate limit: a burst of invites is a burst of modal popups on someone else's screen.
+      const rlKey = `invite:rate:${session.sub}`;
+      const count = await redis.incr(rlKey).catch(() => 0);
+      if (count === 1) await redis.expire(rlKey, 60).catch(() => {});
+      if (count > 10) {
+        set.status = 429;
+        return { error: "rate_limited", retryAfter: 60 };
+      }
+
+      const instance = await prisma.instance.findFirst({
+        where: { id: body.instanceId, closedAt: null },
+        include: { world: { select: { id: true, name: true } } },
+      });
+      if (!instance) {
+        set.status = 404;
+        return { error: "instance_not_found" };
+      }
+
+      // Permission: friends, or co-located in this instance right now.
+      const [a, b] = [session.sub, target.id].sort();
+      const friendship = await prisma.friend.findUnique({
+        where: { userAId_userBId: { userAId: a, userBId: b } },
+      });
+      const areFriends = friendship?.status === 1;
+
+      let coLocated = false;
+      if (!areFriends) {
+        const roster = await redis.hkeys(keys.instanceRoster(instance.id)).catch(() => [] as string[]);
+        coLocated = roster.includes(session.sub) && roster.includes(target.id);
+      }
+      if (!areFriends && !coLocated) {
+        set.status = 403;
+        return { error: "not_permitted", detail: "invite friends, or people in your instance" };
+      }
+
+      const me = await prisma.user.findUnique({
+        where: { id: session.sub },
+        select: { username: true, displayName: true },
+      });
+      const who = me?.displayName || me?.username || "Someone";
+
+      // 15 minutes. Long enough to notice, short enough that the instance probably still exists.
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
+      const row = await notify({
+        userId: target.id,
+        kind: "invite",
+        actorId: session.sub,
+        title: `${who} invited you`,
+        body: `Join them in ${instance.world.name}.`,
+        link: `serikasocial://world/${instance.world.id}`,
+        data: {
+          worldId: instance.world.id,
+          worldName: instance.world.name,
+          instanceId: instance.id,
+          fromUserId: session.sub,
+          fromUsername: me?.username,
+        },
+        expiresAt,
+      });
+
+      return { status: "sent", notificationId: row.id, expiresAt: expiresAt.toISOString() };
+    },
+    {
+      body: t.Object({
+        targetUserId: t.String(),
+        instanceId: t.String(),
+      }),
+    },
   );
