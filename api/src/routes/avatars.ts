@@ -8,6 +8,7 @@ import { parsePMX } from "../pmx.ts";
 import { unzipSync } from "fflate";
 import { extname } from "node:path";
 import { requireTrust, TrustError, TRUST_TO_UPLOAD, trustLabel, MAX_TRUST } from "../trust.ts";
+import { defaultHomeEntry, defaultHomeInclude } from "../default-home.ts";
 
 // Avatar catalogue + upload → `.ska` conversion.
 //
@@ -500,8 +501,12 @@ export const adminRoutes = new Elysia({ prefix: "/v1/admin" })
   .post(
     "/worlds/:id/default-home",
     async ({ params, set }) => {
-      const w = await prisma.world.findUnique({ where: { id: params.id } });
+      const w = await prisma.world.findUnique({ where: { id: params.id }, include: defaultHomeInclude });
       if (!w) { set.status = 404; return { error: "not_found" }; }
+      if (!defaultHomeEntry(w, assetPublicUrl)) {
+        set.status = 409;
+        return { error: "home_requires_public_ready_publication" };
+      }
       await prisma.$transaction([
         prisma.world.updateMany({ where: { isDefaultHome: true }, data: { isDefaultHome: false } }),
         prisma.world.update({ where: { id: params.id }, data: { isDefaultHome: true } }),

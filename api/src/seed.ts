@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { prisma, redis } from "./db.ts";
 import { putBytes } from "./storage.ts";
+import { seedHomeSelection } from "./default-home.ts";
 
 const SUISEI_AVATAR_ID = "00000000-0000-0000-0000-0000000000a1";
 const SUISEI_VERSION_ID = "00000000-0000-0000-0000-00000000a101";
@@ -71,6 +72,8 @@ async function main() {
 
   // Default world. Geometry lives on the CDN as a .serikaworld bundle (see upload-worlds.ts);
   // this row only carries the metadata.
+  const selectedHome = await prisma.world.findFirst({ where: { isDefaultHome: true }, select: { id: true } });
+  const homeSelection = seedHomeSelection(selectedHome?.id ?? null);
   const world = await prisma.world.upsert({
     where: { id: "00000000-0000-0000-0000-0000000000e0" },
     create: {
@@ -81,10 +84,10 @@ async function main() {
       capacity: 48,
       releaseStatus: 2,
       isBuiltin: true,
-      isDefaultHome: true, // placeholder default Home until a dedicated home world exists
+      ...homeSelection, // placeholder only when no administrator has chosen a Home
       heat: 1000, // pin it to the top of the browser
     },
-    update: { name: "The Commons", isDefaultHome: true },
+    update: { name: "The Commons", ...homeSelection },
   });
 
   // ── Community worlds by pikachubolk ─────────────────────────────────────────────

@@ -8,6 +8,7 @@ import { sweepStaleInstances } from "./instances.ts";
 import { requireTrust, TrustError, TRUST_TO_UPLOAD, trustLabel, Cap, effectiveRank } from "../trust.ts";
 import { validateBundle, routeSubmission, ReviewStatus, REVIEW_LABELS, PUBLISHED_STATES } from "../review.ts";
 import { audit } from "../audit.ts";
+import { defaultHomeEntry, defaultHomeInclude } from "../default-home.ts";
 
 // A world upload is capped well above the largest bundle we ship (~70 MB).
 const MAX_WORLD_BYTES = 400 * 1024 * 1024;
@@ -31,6 +32,18 @@ export const worldRoutes = new Elysia({ prefix: "/v1/worlds" })
     },
     { query: t.Object({ limit: t.Optional(t.String()) }) },
   )
+
+  // The client resolves this at Home entry. An explicit null means use its offline Home;
+  // errors remain HTTP errors so it can instead reuse a previously downloaded selection.
+  .get("/default-home", async ({ set }) => {
+    set.headers["Cache-Control"] = "no-store";
+    const world = await prisma.world.findFirst({
+      where: { isDefaultHome: true },
+      orderBy: { id: "asc" },
+      include: defaultHomeInclude,
+    });
+    return { world: defaultHomeEntry(world, assetPublicUrl) };
+  })
 
   .get("/:id", async ({ params, set }) => {
     const world = await prisma.world.findUnique({
