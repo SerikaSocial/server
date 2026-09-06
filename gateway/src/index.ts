@@ -3,6 +3,7 @@
 // holds no game state — everything durable is in Redis/Postgres — so it scales as stateless
 // replicas behind a sticky load balancer.
 
+import { hasInstanceAdmission } from "./instance-admission.ts";
 import { Elysia, t } from "elysia";
 import { Redis } from "ioredis";
 import { jwtVerify } from "jose";
@@ -153,10 +154,8 @@ const app = new Elysia()
           break;
         }
         case "instance:migrate": {
-          // Client acknowledges a migration. Update presence.
-          if (msg.instanceId) {
-            await redis.hset(`presence:${userId}`, "instanceId", msg.instanceId);
-          }
+          // Presence is written by the relay after ticket admission. A client-supplied
+          // instance ID must never advertise membership or overwrite the relay's string.
           break;
         }
 
@@ -165,7 +164,10 @@ const app = new Elysia()
           // Enter an instance's signalling room. The reply lists existing peers so the joiner
           // knows whom to send offers to (initiator = the newcomer, to keep offers one-directional).
           const instanceId: string = msg.instanceId;
-          if (!instanceId) break;
+          if (!await hasInstanceAdmission(redis, instanceId, userId)) {
+            ws.send(JSON.stringify({ type: "error", error: "instance_not_authorized" }));
+            break;
+          }
           let room = rtcRooms.get(instanceId);
           if (!room) { room = new Set(); rtcRooms.set(instanceId, room); }
           const existing = [...room].filter((u) => u !== userId);

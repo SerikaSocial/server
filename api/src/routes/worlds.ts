@@ -62,7 +62,7 @@ export const worldRoutes = new Elysia({ prefix: "/v1/worlds" })
 
     // Live instance list for this world, straight from the durable table (open instances).
     const instances = await prisma.instance.findMany({
-      where: { worldId: world.id, closedAt: null },
+      where: { worldId: world.id, closedAt: null, access: 0 },
       orderBy: { createdAt: "asc" },
     });
 

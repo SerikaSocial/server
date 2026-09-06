@@ -26,6 +26,8 @@ model User {
   /// 0=visitor 1=newcomer 2=member 3=regular 4=known 5=creator 6=trusted 7=partner 8=verified-creator
   trustLevel    Int       @default(0) @map("trust_level")
   currentAvatarId String? @map("current_avatar_id") @db.Uuid
+  homeWorldId   String?   @map("home_world_id") @db.Uuid
+  homeWorld     World?    @relation("PersonalHome", fields: [homeWorldId], references: [id], onDelete: SetNull)
   lastSeen      DateTime? @map("last_seen")
   createdAt     DateTime  @default(now()) @map("created_at")
 
@@ -145,6 +147,7 @@ model World {
   heat               Float    @default(0)
   createdAt          DateTime @default(now()) @map("created_at")
 
+  homeFor   User[]        @relation("PersonalHome")
   author    User?          @relation("WorldAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   versions  WorldVersion[]
   instances Instance[]

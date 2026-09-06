@@ -3,7 +3,7 @@ import { prisma, redis, keys } from "../db.ts";
 import { authed } from "../auth-plugin.ts";
 import { signTicket } from "../tokens.ts";
 import { place } from "../allocator.ts";
-import { PUBLISHED_STATES } from "../review.ts";
+import { canAccessInstance, worldJoinGate, InstanceAccess } from "../instance-access.ts";
 
 /// Check maintenance mode — returns true if the flag is set in Redis. Admins bypass it.
 async function isMaintenance(userId: string): Promise<boolean> {
@@ -13,24 +13,10 @@ async function isMaintenance(userId: string): Promise<boolean> {
   return !user?.isAdmin;
 }
 
-/// A world is joinable by others only when its published version cleared review. The author
-/// (and admins) may launch their own submission privately to iterate — no one else can, and it
-/// never appears in the browser. Returns an error string when the caller may not join.
-async function joinGate(world: { authorId: string | null; publishedVersionId: string | null; isBuiltin: boolean }, userId: string): Promise<string | null> {
-  if (world.isBuiltin) return null;
-  if (world.authorId === userId) return null; // author private test
-  const caller = await prisma.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
-  if (caller?.isAdmin) return null;
-  if (!world.publishedVersionId) return "not_published";
-  const pv = await prisma.worldVersion.findUnique({ where: { id: world.publishedVersionId }, select: { reviewStatus: true } });
-  if (!pv || !PUBLISHED_STATES.has(pv.reviewStatus)) return "not_published";
-  return null;
-}
-
 /// Close instances whose Redis roster is empty and have been idle for a grace period.
 /// Called opportunistically from the world detail endpoint and from the periodic sweep.
 export async function sweepStaleInstances(worldId?: string) {
-  const where = { closedAt: null, ...(worldId ? { worldId } : {}) };
+  const where = { closedAt: null, createdAt: { lt: new Date(Date.now() - 90_000) }, ...(worldId ? { worldId } : {}) };
   const open = await prisma.instance.findMany({ where, select: { id: true, createdAt: true } });
   if (open.length === 0) return;
 
@@ -38,7 +24,8 @@ export async function sweepStaleInstances(worldId?: string) {
     open.map((i) => redis.hlen(`inst:${i.id}:roster`)),
   );
 
-  const stale = open.filter((_, i) => counts[i] === 0);
+  const connecting = await Promise.all(open.map((i) => redis.exists(`instance:connecting:${i.id}`)));
+  const stale = open.filter((_, i) => counts[i] === 0 && connecting[i] === 0);
   if (stale.length === 0) return;
 
   await prisma.instance.updateMany({
@@ -58,6 +45,7 @@ export function startInstanceSweep() {
 
 export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
   .use(authed)
+  .onBeforeHandle(({ set }) => { set.headers["Cache-Control"] = "private, no-store"; })
 
   // Create a fresh instance of a world and return a join ticket for it.
   .post(
@@ -69,7 +57,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
         set.status = 404;
         return { error: "world_not_found" };
       }
-      const gate = await joinGate(world, session.sub);
+      const gate = await worldJoinGate(world, session.sub, body.access === InstanceAccess.Private);
       if (gate) { set.status = 403; return { error: gate }; }
       if (await isMaintenance(session.sub)) { set.status = 503; return { error: "maintenance" }; }
 
@@ -111,7 +99,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
     {
       body: t.Object({
         worldId: t.String(),
-        access: t.Optional(t.Number()),
+        access: t.Optional(t.Integer({ minimum: 0, maximum: 4 })),
       }),
     },
   )
@@ -129,7 +117,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
         set.status = 404;
         return { error: "world_not_found" };
       }
-      const gate = await joinGate(world, session.sub);
+      const gate = await worldJoinGate(world, session.sub);
       if (gate) { set.status = 403; return { error: gate }; }
       if (await isMaintenance(session.sub)) { set.status = 503; return { error: "maintenance" }; }
 
@@ -196,6 +184,13 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       return { error: "instance_not_found" };
     }
 
+    if (!await canAccessInstance(instance, session.sub)) {
+      set.status = 403; return { error: "instance_private" };
+    }
+    const world = await prisma.world.findUnique({ where: { id: instance.worldId } });
+    const gate = world ? await worldJoinGate(world, session.sub, instance.access === InstanceAccess.Private) : "world_not_found";
+    if (gate) { set.status = 403; return { error: gate }; }
+
     const count = await redis.hlen(`inst:${instance.id}:roster`);
     if (count >= instance.capacity) {
       set.status = 409;
@@ -209,14 +204,17 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       set.status = 500;
       return { error: "ticket_failed" };
     }
-    return { instance: serializeInstance(instance), endpoint: instance.endpoint, ...ticket };
+    return { instance: serializeInstance(instance), endpoint: instance.endpoint, worldName: world!.name, ...ticket };
   })
 
-  .get("/:id", async ({ params, set }) => {
+  .get("/:id", async ({ params, session, set }) => {
     const instance = await prisma.instance.findUnique({ where: { id: params.id } });
     if (!instance || instance.closedAt) {
       set.status = 404;
       return { error: "instance_not_found" };
+    }
+    if (!await canAccessInstance(instance, session.sub)) {
+      set.status = 404; return { error: "instance_not_found" };
     }
     const roster = await redis.hkeys(`inst:${instance.id}:roster`);
     return { ...serializeInstance(instance), members: roster };
@@ -257,16 +255,21 @@ export async function mintTicket(instanceId: string, userId: string) {
   });
   // Pre-register the ticket as valid-and-unused; the relay atomically flips it on use.
   await redis.set(`ticket:valid:${jti}`, instanceId, "EX", 60);
+  // Gateway signalling requires the same API-authorized admission as the relay. This
+  // short grant covers the connect window without exposing a long-lived credential.
+  await redis.set(`instance:admission:${instanceId}:${userId}`, "1", "EX", 60);
+  await redis.set(`instance:connecting:${instanceId}`, "1", "EX", 90);
   return { ticket: token, jti };
 }
 
 function serializeInstance(i: {
   id: string; worldId: string; access: number; mode: number; region: string;
-  capacity: number; playerCount: number;
+  capacity: number; playerCount: number; ownerId: string | null;
 }) {
   return {
     id: i.id,
     worldId: i.worldId,
+    ownerId: i.ownerId,
     access: i.access,
     mode: i.mode,
     region: i.region,

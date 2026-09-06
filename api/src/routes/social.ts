@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 import { authed } from "../auth-plugin.ts";
 import { prisma, redis, keys } from "../db.ts";
+import { canInviteToInstance, worldJoinGate } from "../instance-access.ts";
 import { notify } from "../notify.ts";
 
 /// Friends, blocks, and social surface. M7.
@@ -378,11 +379,20 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
 
       const instance = await prisma.instance.findFirst({
         where: { id: body.instanceId, closedAt: null },
-        include: { world: { select: { id: true, name: true } } },
+        include: { world: true },
       });
       if (!instance) {
         set.status = 404;
         return { error: "instance_not_found" };
+      }
+
+      // Only occupants can invite; private rooms reserve this to their owner. Without
+      // this check a friend could invite someone into any guessed private instance.
+      if (!await canInviteToInstance(instance, session.sub)) {
+        set.status = 403; return { error: "not_permitted", detail: "Only the host can invite to a private instance." };
+      }
+      if (await worldJoinGate(instance.world, target.id)) {
+        set.status = 403; return { error: "not_published" };
       }
 
       // Permission: friends, or co-located in this instance right now.
@@ -422,6 +432,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
           worldId: instance.world.id,
           worldName: instance.world.name,
           instanceId: instance.id,
+          access: instance.access,
           fromUserId: session.sub,
           fromUsername: me?.username,
         },
