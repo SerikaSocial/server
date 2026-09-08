@@ -139,6 +139,16 @@ async fn two_clients_relay_pose() {
     assert!(roster.contains_key("user-a"));
     assert!(roster.contains_key("user-b"));
 
+    // Closing one event kicks its guests and invalidates outstanding tickets.
+    let _: () = mgr.set_ex(format!("inst:{instance}:closed"), "1", 30).await.unwrap();
+    recv_typed(&a, 0x08, 8).await.expect("event closure rejects alice");
+    recv_typed(&b, 0x08, 8).await.expect("event closure rejects bob");
+    let _: () = mgr.set("ticket:valid:jti-rejoin-test", &instance).await.unwrap();
+    a.send(&write_hello(&mint(&instance, "user-a", "alice", "jti-rejoin-test"))).await.unwrap();
+    recv_typed(&a, 0x08, 8).await.expect("closed instance rejects a fresh ticket");
+    let _: () = mgr.del(format!("inst:{instance}:closed")).await.unwrap();
+    let _: () = mgr.del("ticket:valid:jti-rejoin-test").await.unwrap();
+
     // Cleanup.
     let _: () = mgr.del(format!("inst:{instance}:roster")).await.unwrap();
     let _: () = mgr.del("presence:user-a").await.unwrap();

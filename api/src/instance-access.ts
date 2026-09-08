@@ -2,7 +2,7 @@ import { prisma, redis, keys } from "./db.ts";
 import { PUBLISHED_STATES } from "./review.ts";
 
 export const InstanceAccess = { Public: 0, Friends: 1, FriendsOfFriends: 2, Invite: 3, Private: 4 } as const;
-type Instance = { id: string; ownerId: string | null; access: number; closedAt: Date | null };
+type Instance = { id: string; ownerId: string | null; access: number; closedAt: Date | null; eventId?: string | null };
 
 export async function blockedBetween(a: string, b: string) {
   return !!await prisma.block.findFirst({ where: { OR: [
@@ -20,6 +20,10 @@ export async function areFriends(a: string, b: string) {
  * A guessed ID or a forwarded link is never a private-instance access grant. */
 export async function canAccessInstance(instance: Instance, userId: string): Promise<boolean> {
   if (instance.closedAt) return false;
+  if (instance.eventId) {
+    const event = await prisma.liveEvent.findUnique({ where: { id: instance.eventId }, select: { status: true } });
+    if (!event || !["open", "live"].includes(event.status)) return false;
+  }
   if (instance.ownerId === userId) return true;
   if (instance.access === InstanceAccess.Public) return true;
   if (!instance.ownerId || await blockedBetween(instance.ownerId, userId)) return false;
@@ -52,14 +56,15 @@ export async function canInviteToInstance(instance: Instance, userId: string): P
 }
 
 export async function worldJoinGate(world: {
-  id: string; authorId: string | null; publishedVersionId: string | null; isBuiltin: boolean; releaseStatus: number;
-}, userId: string, privatePreview = false): Promise<string | null> {
+  id: string; authorId: string | null; publishedVersionId: string | null; isBuiltin: boolean; releaseStatus: number; eventOnly?: boolean;
+}, userId: string, privatePreview = false, eventAdmission = false): Promise<string | null> {
   // Author/admin previews must be deliberately private, never public matchmaking.
   if (privatePreview && world.authorId === userId) return null;
   if (privatePreview) {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
     if (user?.isAdmin) return null;
   }
+  if (world.eventOnly && !eventAdmission) return "event_join_required";
   if (world.releaseStatus < 1 || !world.publishedVersionId) return "not_published";
   const published = await prisma.worldVersion.findUnique({ where: { id: world.publishedVersionId },
     select: { worldId: true, buildStatus: true, reviewStatus: true } });

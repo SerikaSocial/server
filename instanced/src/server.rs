@@ -139,6 +139,12 @@ impl Server {
             }
         };
 
+        let closed: bool = self.redis.exists(format!("inst:{}:closed", claims.instance_id)).await.unwrap_or(true);
+        if closed {
+            let _ = self.socket.send_to(&write_reject("event ended"), from).await;
+            return Ok(());
+        }
+
         // Single-use: the api registered `ticket:valid:{jti}`; we atomically delete it.
         // A second connection with the same ticket finds nothing and is rejected.
         let consumed: i64 = self.redis.del(format!("ticket:valid:{}", claims.jti)).await.unwrap_or(0);
@@ -381,6 +387,18 @@ impl Server {
             return;
         }
 
+        // Per-event closure only evicts that event's instances, never unrelated worlds.
+        let instances: Vec<String> = self.by_instance.keys().cloned().collect();
+        for instance in instances {
+            let closed: bool = self.redis.exists(format!("inst:{}:closed", instance)).await.unwrap_or(false);
+            if closed {
+                let addrs = self.by_instance.get(&instance).cloned().unwrap_or_default();
+                for addr in addrs {
+                    let _ = self.socket.send_to(&write_reject("event ended"), addr).await;
+                    self.remove_peer(addr).await;
+                }
+            }
+        }
         let now = Instant::now();
         let dead: Vec<SocketAddr> = self
             .peers

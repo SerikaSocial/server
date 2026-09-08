@@ -2,6 +2,7 @@ import { Elysia } from "elysia";
 import { cors } from "@elysiajs/cors";
 import { config } from "./config.ts";
 import { prisma, redis } from "./db.ts";
+import { eventRoutes, adminEventRoutes } from "./routes/events.ts";
 import { homeRoutes } from "./routes/home.ts";
 import { sessionRoutes } from "./routes/session.ts";
 import { webAuthRoutes } from "./routes/web-auth.ts";
@@ -30,6 +31,8 @@ const app = new Elysia()
     ]);
     return { status: dbOk && redisOk ? "ok" : "degraded", service: "serika-social-api", db: dbOk, redis: redisOk };
   })
+  .use(eventRoutes)
+  .use(adminEventRoutes)
   .use(homeRoutes)
   .use(sessionRoutes)
   .use(webAuthRoutes)
@@ -64,7 +67,7 @@ const app = new Elysia()
     set.status = set.status && set.status !== 200 ? set.status : 500;
     return { error: "internal_error" };
   })
-  .listen(config.port);
+  .listen({ port: config.port, maxRequestBodySize: 256 * 1024 * 1024 });
 
 console.log(`serika-social-api on :${config.port} → db ${config.databaseUrl.replace(/:[^:@]*@/, ":****@")}`);
 

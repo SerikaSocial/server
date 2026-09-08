@@ -6,7 +6,7 @@ import { place } from "../allocator.ts";
 import { canAccessInstance, worldJoinGate, InstanceAccess } from "../instance-access.ts";
 
 /// Check maintenance mode — returns true if the flag is set in Redis. Admins bypass it.
-async function isMaintenance(userId: string): Promise<boolean> {
+export async function isMaintenance(userId: string): Promise<boolean> {
   const flag = await redis.get(keys.maintenance);
   if (flag !== "1") return false;
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { isAdmin: true } });
@@ -188,7 +188,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       set.status = 403; return { error: "instance_private" };
     }
     const world = await prisma.world.findUnique({ where: { id: instance.worldId } });
-    const gate = world ? await worldJoinGate(world, session.sub, instance.access === InstanceAccess.Private) : "world_not_found";
+    const gate = world ? await worldJoinGate(world, session.sub, instance.access === InstanceAccess.Private, !!instance.eventId) : "world_not_found";
     if (gate) { set.status = 403; return { error: gate }; }
 
     const count = await redis.hlen(`inst:${instance.id}:roster`);
@@ -262,7 +262,7 @@ export async function mintTicket(instanceId: string, userId: string) {
   return { ticket: token, jti };
 }
 
-function serializeInstance(i: {
+export function serializeInstance(i: {
   id: string; worldId: string; access: number; mode: number; region: string;
   capacity: number; playerCount: number; ownerId: string | null;
 }) {
