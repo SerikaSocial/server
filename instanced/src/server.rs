@@ -33,6 +33,11 @@ const LOD_SKIP: u32 = 2;
 /// Per-peer bandwidth budget: warn if a single peer exceeds this in bytes/sec.
 const BW_BUDGET_BPS: u64 = 64 * 1024;
 
+/// Minimum gap between one peer's avatar-change announcements. Every recipient answers one of
+/// these with an API lookup and possibly a download, so an unthrottled sender could aim the whole
+/// instance at the API as fast as it can send datagrams.
+const AVATAR_ANNOUNCE_COOLDOWN: Duration = Duration::from_secs(3);
+
 struct Peer {
     peer_id: u32,
     instance_id: String,
@@ -47,6 +52,8 @@ struct Peer {
     bytes_sent: u64,
     /// Window start for bandwidth tracking.
     bw_window_start: Instant,
+    /// Rate limit for AvatarChanged. Starts far enough in the past that the first one is allowed.
+    last_avatar_announce: Instant,
 }
 
 pub struct Server {
@@ -106,6 +113,7 @@ impl Server {
             MsgType::Pose => self.handle_frame(MsgType::Pose, payload, from, validate_pose).await,
             MsgType::Voice => self.handle_frame(MsgType::Voice, payload, from, validate_voice).await,
             MsgType::Chat => self.handle_chat(payload, from).await,
+            MsgType::AvatarChanged => self.handle_avatar_changed(from).await,
             MsgType::ObjectSync => self.handle_object_sync(payload, from).await,
             MsgType::PhysGrab => self.handle_phys_grab(payload, from).await,
             MsgType::Ping => {
@@ -198,6 +206,7 @@ impl Server {
             frame_seq: 0,
             bytes_sent: 0,
             bw_window_start: Instant::now(),
+            last_avatar_announce: Instant::now() - AVATAR_ANNOUNCE_COOLDOWN,
         };
 
         let welcome = self.build_welcome(peer_id, &claims.instance_id, from);
@@ -320,6 +329,27 @@ impl Server {
     /// World text chat: re-frame `[text]` as `[Chat][sender_id][text]` and fan out to the whole
     /// instance (no AOI — everyone in the room sees chat). The sender is excluded because clients
     /// echo their own line locally. Text is capped and must be valid UTF-8; bad input is dropped.
+    /// "I changed avatar" — fanned out to the whole instance, ignoring AOI, because a peer
+    /// across the room still has to stop rendering the model this player is no longer wearing.
+    ///
+    /// RATE LIMITED, and that is not optional: every recipient answers one of these with an API
+    /// lookup and possibly a download, so an unthrottled sender could point the entire instance
+    /// at the API as fast as it can send datagrams. One per AVATAR_ANNOUNCE_COOLDOWN per peer;
+    /// the rest are dropped silently, since a swap the room missed is corrected the next time
+    /// anyone joins.
+    async fn handle_avatar_changed(&mut self, from: SocketAddr) {
+        let Some(peer) = self.peers.get_mut(&from) else { return };
+        peer.last_seen = Instant::now();
+        let now = Instant::now();
+        if now.duration_since(peer.last_avatar_announce) < AVATAR_ANNOUNCE_COOLDOWN {
+            return;
+        }
+        peer.last_avatar_announce = now;
+        let (peer_id, instance_id) = (peer.peer_id, peer.instance_id.clone());
+        let out = write_relayed(MsgType::AvatarChanged, peer_id, &[]);
+        self.broadcast(&instance_id, &out, Some(from)).await;
+    }
+
     async fn handle_chat(&mut self, payload: &[u8], from: SocketAddr) {
         const MAX_CHAT_BYTES: usize = 400;
         let Some(peer) = self.peers.get_mut(&from) else { return };

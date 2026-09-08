@@ -45,6 +45,13 @@ pub enum MsgType {
     /// grab_type: 0=start grab, 1=update grab position, 2=release grab
     /// Used for hair/PhysBone grabbing and physics prop grabbing on other players.
     PhysGrab = 0x0B,
+    /// client→server: no payload · server→client: `[peer_id: u32]`
+    /// "I changed avatar." Deliberately carries neither a url nor an id: receivers re-read the
+    /// sender's avatar from the API by user id, which is already the source of truth, so a
+    /// malicious client cannot aim everyone else's downloader at a url of its choosing.
+    /// Fanned out to the whole instance like Chat — AOI does not apply, since a peer across the
+    /// room still has to stop rendering the old model.
+    AvatarChanged = 0x0C,
 }
 
 impl MsgType {
@@ -61,6 +68,7 @@ impl MsgType {
             0x09 => Self::Chat,
             0x0A => Self::ObjectSync,
             0x0B => Self::PhysGrab,
+            0x0C => Self::AvatarChanged,
             _ => return None,
         })
     }
