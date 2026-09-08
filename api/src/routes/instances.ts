@@ -15,9 +15,17 @@ export async function isMaintenance(userId: string): Promise<boolean> {
 
 /// Close instances whose Redis roster is empty and have been idle for a grace period.
 /// Called opportunistically from the world detail endpoint and from the periodic sweep.
+///
+/// Instances belonging to an OPEN OR LIVE event are exempt, and that exemption is the whole
+/// reason this function takes an event into account at all. An event venue is heavy: the first
+/// visit on a machine compiles the show's shaders and can freeze the client for minutes, long
+/// past the relay's 10 s PEER_TIMEOUT, so the roster legitimately empties out while everyone is
+/// still loading. Sweeping the instance then means the next `/v1/events/:id/join` finds nothing
+/// open and allocates a fresh one — which is exactly how an event ends up with every attendee
+/// alone in their own instance. An event's instances are closed explicitly by `event.close`.
 export async function sweepStaleInstances(worldId?: string) {
   const where = { closedAt: null, createdAt: { lt: new Date(Date.now() - 90_000) }, ...(worldId ? { worldId } : {}) };
-  const open = await prisma.instance.findMany({ where, select: { id: true, createdAt: true } });
+  const open = await prisma.instance.findMany({ where, select: { id: true, createdAt: true, eventId: true, event: { select: { status: true } } } });
   if (open.length === 0) return;
 
   const counts = await Promise.all(
@@ -25,7 +33,8 @@ export async function sweepStaleInstances(worldId?: string) {
   );
 
   const connecting = await Promise.all(open.map((i) => redis.exists(`instance:connecting:${i.id}`)));
-  const stale = open.filter((_, i) => counts[i] === 0 && connecting[i] === 0);
+  const stale = open.filter((inst, i) =>
+    counts[i] === 0 && connecting[i] === 0 && !(inst.event && ["open", "live"].includes(inst.event.status)));
   if (stale.length === 0) return;
 
   await prisma.instance.updateMany({
