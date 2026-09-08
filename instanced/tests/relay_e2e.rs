@@ -154,3 +154,87 @@ async fn two_clients_relay_pose() {
     let _: () = mgr.del("presence:user-a").await.unwrap();
     let _: () = mgr.del("presence:user-b").await.unwrap();
 }
+
+/// A reconnecting client arrives from a NEW source address, and the relay keys peers by
+/// SocketAddr while keying every piece of Redis state by user id. Before the eviction in
+/// `handle_hello` this produced, in order: a duplicate ghost peer for the same user, and then —
+/// when the abandoned session hit PEER_TIMEOUT — a `remove_peer` that deleted the roster and
+/// presence entries belonging to the session that had REPLACED it. The player was still sitting
+/// in the world, but had vanished from the roster, so the API's stale-instance sweep was free to
+/// close a populated instance.
+///
+/// This drives the real relay: two sockets for the same user, and an observer who must see
+/// exactly one join for the reconnection and a leave for the ghost.
+#[tokio::test]
+async fn reconnect_from_new_address_replaces_the_old_session() {
+    let redis_url = match std::env::var("REDIS_URL") {
+        Ok(u) => u,
+        Err(_) => { eprintln!("REDIS_URL unset — skipping"); return; }
+    };
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut mgr = match redis::aio::ConnectionManager::new(client).await {
+        Ok(m) => m,
+        Err(e) => { eprintln!("redis unreachable ({e}) — skipping: {e}"); return; }
+    };
+
+    let instance = format!("test-recon-{}", std::process::id());
+    for jti in ["jti-r-obs", "jti-r-1", "jti-r-2"] {
+        let _: () = mgr.set(format!("ticket:valid:{jti}"), &instance).await.unwrap();
+    }
+
+    let server_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let server_addr = server_sock.local_addr().unwrap();
+    let srv = Server::new(server_sock, mgr.clone(), SECRET, "test-node".into());
+    tokio::spawn(srv.run());
+
+    // An observer already in the instance, so we can watch what the OTHER players are told.
+    let obs = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    obs.connect(server_addr).await.unwrap();
+    obs.send(&write_hello(&mint(&instance, "user-obs", "obs", "jti-r-obs"))).await.unwrap();
+    recv_typed(&obs, 0x02, 4).await.expect("observer gets WELCOME");
+
+    // The player joins, then "reconnects" from a brand-new socket — a new source address, which
+    // is exactly what a fresh UdpClient (or a NAT rebind) looks like to the relay.
+    let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    first.connect(server_addr).await.unwrap();
+    first.send(&write_hello(&mint(&instance, "user-x", "xan", "jti-r-1"))).await.unwrap();
+    recv_typed(&first, 0x02, 4).await.expect("first session gets WELCOME");
+    let join1 = recv_typed(&obs, 0x03, 4).await.expect("observer sees the first join");
+    let peer1 = u32::from_le_bytes([join1[1], join1[2], join1[3], join1[4]]);
+
+    let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    second.connect(server_addr).await.unwrap();
+    second.send(&write_hello(&mint(&instance, "user-x", "xan", "jti-r-2"))).await.unwrap();
+    let welcome2 = recv_typed(&second, 0x02, 4).await.expect("second session gets WELCOME");
+    let peer2 = u32::from_le_bytes([welcome2[1], welcome2[2], welcome2[3], welcome2[4]]);
+    assert_ne!(peer1, peer2, "the reconnection is a distinct peer id");
+
+    // The observer must be told the ghost left, or it renders two copies of this player.
+    let leave = recv_typed(&obs, 0x04, 6).await.expect("observer is told the ghost left");
+    let left_id = u32::from_le_bytes([leave[1], leave[2], leave[3], leave[4]]);
+    assert_eq!(left_id, peer1, "it is the ABANDONED session that leaves, not the live one");
+
+    // The reconnected session must still own the roster: this is the entry the API's sweep
+    // reads to decide whether an instance is empty.
+    let roster: std::collections::HashMap<String, String> =
+        mgr.hgetall(format!("inst:{instance}:roster")).await.unwrap();
+    assert!(roster.contains_key("user-x"), "the reconnected player is still on the roster");
+    let member = &roster["user-x"];
+    assert!(member.contains(&format!("\"peerId\":{peer2}")),
+        "the roster names the LIVE session, got {member}");
+
+    // The second session is the one that works: its pose must reach the observer.
+    let pose = PoseFrame {
+        lod: Lod::Body, sequence: 9, root_pos: [0.0, 0.0, 0.0], root_rot: [0.0, 0.0, 0.0, 1.0],
+        bones: vec![[0.0, 0.0, 0.0, 1.0]; Lod::Body.bone_count()], hands: [[0.0; 3]; 2],
+    };
+    let mut msg = vec![0x05u8];
+    msg.extend_from_slice(&pose.encode());
+    second.send(&msg).await.unwrap();
+    let relayed = recv_typed(&obs, 0x05, 6).await.expect("observer receives the reconnected pose");
+    let sender = u32::from_le_bytes([relayed[1], relayed[2], relayed[3], relayed[4]]);
+    assert_eq!(sender, peer2, "poses now come from the live session");
+
+    let _: () = mgr.del(format!("inst:{instance}:roster")).await.unwrap();
+    for u in ["user-x", "user-obs"] { let _: () = mgr.del(format!("presence:{u}")).await.unwrap(); }
+}

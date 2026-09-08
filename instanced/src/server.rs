@@ -153,6 +153,29 @@ impl Server {
             anyhow::bail!("ticket replay: {}", claims.jti);
         }
 
+        // ONE USER, ONE SESSION. Peers are keyed by SocketAddr but every piece of Redis state
+        // -- roster, presence -- is keyed by user id, and a client that reconnects or whose NAT
+        // rebinds arrives from a NEW address. Without this eviction the old session lingers for
+        // PEER_TIMEOUT as a frozen ghost avatar in everyone else's world, and when it finally
+        // expires `remove_peer` tears down the roster and presence entries belonging to the
+        // session that REPLACED it -- so a player sitting in the world silently disappears from
+        // the roster, player counts drift, and an instance the API then reads as empty gets
+        // swept out from under everyone still standing in it.
+        //
+        // Scanned across ALL instances, not just this one: a user travelling from world A to
+        // world B leaves a peer behind in A whose expiry would otherwise clear the presence key
+        // they now hold in B.
+        let stale: Vec<SocketAddr> = self
+            .peers
+            .iter()
+            .filter(|(addr, p)| **addr != from && p.user_id == claims.sub)
+            .map(|(addr, _)| *addr)
+            .collect();
+        for addr in stale {
+            tracing::info!(user = %claims.username, "evicting stale session (reconnect or NAT rebind)");
+            self.remove_peer(addr).await;
+        }
+
         // Capacity guard against the live roster.
         let roster_key = format!("inst:{}:roster", claims.instance_id);
         let count: usize = self.redis.hlen(&roster_key).await.unwrap_or(0);
@@ -422,12 +445,25 @@ impl Server {
         let leave = write_peer_leave(peer.peer_id);
         self.broadcast(&peer.instance_id, &leave, None).await;
 
-        let _: Result<(), _> = self
-            .redis
-            .hdel(format!("inst:{}:roster", peer.instance_id), &peer.user_id)
-            .await;
-        let _: Result<(), _> = self.redis.del(format!("presence:{}", peer.user_id)).await;
-        tracing::info!(peer_id = peer.peer_id, user = %peer.username, "left");
+        // Only tear down Redis state this session still OWNS. Both keys are per-user, so a
+        // newer session for the same user may already have overwritten them; deleting them
+        // here would evict a player who is connected right now. The roster member carries the
+        // peer id precisely so this ownership question can be answered. A missing or
+        // unparseable entry is treated as ours, which at worst repeats a delete that has
+        // already happened.
+        let roster_key = format!("inst:{}:roster", peer.instance_id);
+        let current: Option<String> = self.redis.hget(&roster_key, &peer.user_id).await.unwrap_or(None);
+        let still_ours = current.as_deref().map_or(true, |member| {
+            serde_json::from_str::<serde_json::Value>(member)
+                .ok()
+                .and_then(|v| v.get("peerId").and_then(|id| id.as_u64()))
+                .map_or(true, |id| id == peer.peer_id as u64)
+        });
+        if still_ours {
+            let _: Result<(), _> = self.redis.hdel(&roster_key, &peer.user_id).await;
+            let _: Result<(), _> = self.redis.del(format!("presence:{}", peer.user_id)).await;
+        }
+        tracing::info!(peer_id = peer.peer_id, user = %peer.username, superseded = !still_ours, "left");
     }
 
     /// Advertise this relay to the allocator: node membership + current load.
