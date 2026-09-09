@@ -91,6 +91,7 @@ function extractHumanoid(gltf: any): Record<string, string> {
         if (n) out[role] = n;
       }
     }
+    validateAndFixBoneMappings(gltf, out);
     return out;
   }
 
@@ -103,8 +104,44 @@ function extractHumanoid(gltf: any): Record<string, string> {
         if (n) out[role] = n;
       }
     }
+    validateAndFixBoneMappings(gltf, out);
   }
   return out;
+}
+
+/// Defensive sanity check on VRM-declared bone mappings. Some authored VRM files have
+/// incorrect mappings (e.g. eyes mapped to ear bones, hips mapped to the armature root).
+/// For each suspicious mapping, try to find a better candidate by name among the glTF nodes.
+function validateAndFixBoneMappings(gltf: any, out: Record<string, string>): void {
+  const nodeNames: string[] = (gltf.nodes ?? []).map((_: any, i: number) => nodeName(gltf, i) ?? "");
+  const lower = nodeNames.map((n: string) => n.toLowerCase());
+
+  // Eye bones should contain "eye" in the name — some VRM files map them to ear bones.
+  for (const role of ["leftEye", "rightEye"] as const) {
+    const mapped = out[role];
+    if (mapped && !mapped.toLowerCase().includes("eye")) {
+      const want = role === "leftEye" ? ["eye.l", "eye.left", "lefteye", "left_eye"] : ["eye.r", "eye.right", "righteye", "right_eye"];
+      const idx = lower.findIndex((n: string) => want.includes(n));
+      if (idx >= 0) out[role] = nodeNames[idx];
+    }
+  }
+
+  // Hips should not be the armature root (commonly named "root" or "armature").
+  const hips = out["hips"];
+  if (hips && (hips.toLowerCase() === "root" || hips.toLowerCase() === "armature")) {
+    const idx = lower.findIndex((n: string) => n === "hips" || n === "hip" || n === "pelvis");
+    if (idx >= 0) out["hips"] = nodeNames[idx];
+  }
+
+  // Thumb proximal should contain "proximal" — some VRM files shift it to intermediate.
+  for (const role of ["leftThumbProximal", "rightThumbProximal"] as const) {
+    const mapped = out[role];
+    if (mapped && !mapped.toLowerCase().includes("proximal")) {
+      const side = role.startsWith("left") ? ".l" : ".r";
+      const idx = lower.findIndex((n: string) => n.includes("thumb") && n.includes("proximal") && n.endsWith(side));
+      if (idx >= 0) out[role] = nodeNames[idx];
+    }
+  }
 }
 
 /// Approximate rest-pose world Y of each node by summing local translations down the scene tree
