@@ -86,10 +86,18 @@ function clipStartSeconds(value: unknown): number {
   return Math.min(n, 14400);
 }
 
-function jobKey(url: string, startSeconds = 0): string {
+function clipHeight(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (n >= 1080) return 1080;
+  if (n >= 720) return 720;
+  return 480;
+}
+
+function jobKey(url: string, startSeconds = 0, height = SERVER_MAX_HEIGHT): string {
   const ss = clipStartSeconds(startSeconds);
+  const h = clipHeight(height);
   return createHash("sha256")
-    .update(`${url}|h=${SERVER_MAX_HEIGHT}|s=${JOB_SEGMENT_SECONDS}|ss=${ss}|v1`)
+    .update(`${url}|h=${h}|s=${JOB_SEGMENT_SECONDS}|ss=${ss}|v1`)
     .digest("hex")
     .slice(0, 16);
 }
@@ -112,9 +120,10 @@ async function completeSegments(job: TranscodeJob): Promise<number> {
   return job.done ? count : count - 1;
 }
 
-async function startJob(url: string, startSeconds = 0): Promise<TranscodeJob> {
+async function startJob(url: string, startSeconds = 0, height = SERVER_MAX_HEIGHT): Promise<TranscodeJob> {
   const ss = clipStartSeconds(startSeconds);
-  const id = jobKey(url, ss);
+  const h = clipHeight(height);
+  const id = jobKey(url, ss, h);
   const existing = jobs.get(id);
   if (existing) {
     existing.lastAccess = Date.now();
@@ -144,8 +153,8 @@ async function startJob(url: string, startSeconds = 0): Promise<TranscodeJob> {
       job.title = resolved.title ?? null;
       job.duration = resolved.duration ?? null;
 
-      const track = resolved.tracks.find(t => (t.height ?? 0) <= SERVER_MAX_HEIGHT)
-        ?? resolved.tracks.find(t => (t.height ?? 0) <= 720)
+      const track = resolved.tracks.find(t => (t.height ?? 0) <= h)
+        ?? resolved.tracks.find(t => (t.height ?? 0) <= Math.max(h, 720))
         ?? resolved.tracks[0];
       if (!track) throw new Error("no_playable_streams");
 
@@ -167,7 +176,7 @@ async function startJob(url: string, startSeconds = 0): Promise<TranscodeJob> {
       args.push("-map", separateAudio ? "0:v:0" : "0:v:0", "-map", separateAudio ? "1:a:0?" : "0:a:0?");
 
       args.push(
-        "-vf", `scale=-2:min(${SERVER_MAX_HEIGHT}\\,ih)`,
+        "-vf", `scale=-2:min(${h}\\,ih)`,
         "-pix_fmt", "yuv420p",
         "-c:v", "libtheora", "-q:v", "5", "-threads", String(SERVER_ENCODE_THREADS),
         "-c:a", "libvorbis", "-q:a", "4",
@@ -549,9 +558,10 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
       const url = (query.url ?? "").trim();
       if (!url) { set.status = 400; return { error: "missing_url" }; }
       const startSeconds = clipStartSeconds(query.start);
+      const height = clipHeight(query.height ?? SERVER_MAX_HEIGHT);
 
       try {
-        const existing = jobs.get(jobKey(url, startSeconds));
+        const existing = jobs.get(jobKey(url, startSeconds, height));
         // The concurrency cap now limits *distinct* encodes, not viewers — attaching to a job
         // that already exists costs nothing, so it must never be refused.
         if (!existing && activeTranscodes >= MAX_CONCURRENT_TRANSCODES) {
@@ -559,7 +569,7 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
           return { error: "transcode_busy" };
         }
 
-        const job = await startJob(url, startSeconds);
+        const job = await startJob(url, startSeconds, height);
         await job.starting;
         job.lastAccess = Date.now();
 
@@ -580,7 +590,7 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
         return { error: e instanceof Error ? e.message : String(e) };
       }
     },
-    { query: t.Object({ url: t.String(), start: t.Optional(t.String()) }) },
+    { query: t.Object({ url: t.String(), start: t.Optional(t.String()), height: t.Optional(t.String()) }) },
   )
   .get(
     "/segment/:id/:n",

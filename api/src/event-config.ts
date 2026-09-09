@@ -17,6 +17,7 @@ export type ShowConfig = {
   videoUrl?: string;
   preshowVideoUrl?: string;
   preshowStartSeconds?: number;
+  preshowDuration?: number;
   /** Unix milliseconds. Clients switch from preshow to videoUrl at this wall clock. */
   scheduledStart?: number;
 };
@@ -52,6 +53,7 @@ export function validateShowConfig(value: unknown): ShowConfig {
   if (videoEvent) {
     if (!finite(c.duration, .1, 14400)) throw new Error("Track duration must be between 0.1 seconds and four hours.");
     if (c.preshowStartSeconds !== undefined && !finite(c.preshowStartSeconds, 0, 14400)) throw new Error("Invalid preshow start offset.");
+    if (c.preshowDuration !== undefined && !finite(c.preshowDuration, 1, 14400)) throw new Error("Invalid preshow duration.");
     if (c.scheduledStart !== undefined && !finite(c.scheduledStart, 1e12, 4e12)) throw new Error("Invalid scheduled start.");
   } else {
   for (const key of [c.artistKey, c.animationKey, c.audioKey])
@@ -117,7 +119,7 @@ export function validateShowConfig(value: unknown): ShowConfig {
     stageAudioLeftKey: c.stageAudioLeftKey ?? undefined, stageAudioRightKey: c.stageAudioRightKey ?? undefined, introAudioKey: c.introAudioKey ?? undefined,
     performerPath: c.performerPath ?? [], introKey: c.introKey, introDuration: c.introDuration, segments: c.segments ?? [], lights: c.lights ?? [], mouth: c.mouth ?? [], mouthGain: c.mouthGain ?? 1.3, mouthFps: c.mouthFps ?? 5, mouthRound: c.mouthRound ?? [], beats: c.beats ?? [], musicEnergy: c.musicEnergy ?? [], musicFps: c.musicFps ?? 25, artistKey: c.artistKey, animationKey: c.animationKey, audioKey: c.audioKey, clip: c.clip,
     duration: c.duration, performer: c.performer ?? [0, 0, 0], yaw: c.yaw ?? 0, scale: c.scale ?? 1, cameras: c.cameras ?? [],
-    videoUrl, preshowVideoUrl, preshowStartSeconds: c.preshowStartSeconds ?? 0, scheduledStart: c.scheduledStart };
+    videoUrl, preshowVideoUrl, preshowStartSeconds: c.preshowStartSeconds ?? 0, preshowDuration: c.preshowDuration ?? 0, scheduledStart: c.scheduledStart };
 }
 
 /** Shared by create/edit so optional audio receives the same existence checks. */
