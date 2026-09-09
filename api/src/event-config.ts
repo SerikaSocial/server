@@ -11,8 +11,14 @@ export type ShowConfig = {
   lights?: { time: number; color: Point; energy: number; look?: string; fade?: number; accent?: number }[];
   mouth?: number[]; mouthFps?: number; mouthRound?: number[]; mouthGain?: number;
   beats?: number[]; musicEnergy?: number[]; musicFps?: number;
-  artistKey: string; animationKey: string; audioKey: string; clip: string; duration: number;
-  performer: Point; yaw: number; scale: number; cameras: CameraKey[];
+  artistKey?: string; animationKey?: string; audioKey?: string; clip?: string; duration: number;
+  performer?: Point; yaw?: number; scale?: number; cameras?: CameraKey[];
+  /** YouTube watch-party: live/main URL. When set, concert performer assets are optional. */
+  videoUrl?: string;
+  preshowVideoUrl?: string;
+  preshowStartSeconds?: number;
+  /** Unix milliseconds. Clients switch from preshow to videoUrl at this wall clock. */
+  scheduledStart?: number;
 };
 export const EVENT_TRANSITIONS: Record<string, Record<string, string>> = {
   draft: { open: "open" }, open: { play: "live", close: "ended" },
@@ -23,31 +29,54 @@ export function transition(status: string, action: string): string {
   if (!next) throw new Error(`Cannot ${action} an event that is ${status}.`);
   return next;
 }
+function youtubeUrl(value: unknown, label: string): string | undefined {
+  if (value == null || value === "") return undefined;
+  if (typeof value !== "string" || value.length > 500) throw new Error(`Invalid ${label}.`);
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error(`Invalid ${label}.`); }
+  if (parsed.protocol !== "https:") throw new Error(`${label} must be https.`);
+  const host = parsed.hostname.replace(/^www\./, "").toLowerCase();
+  if (host !== "youtube.com" && host !== "youtu.be" && host !== "youtube-nocookie.com")
+    throw new Error(`${label} must be a YouTube URL.`);
+  return value;
+}
+
 export function validateShowConfig(value: unknown): ShowConfig {
   const c = value as ShowConfig;
   const finite = (n: unknown, min: number, max: number) => typeof n === "number" && Number.isFinite(n) && n >= min && n <= max;
   const point = (p: unknown): p is Point => Array.isArray(p) && p.length === 3 && p.every(n => finite(n, -1000, 1000));
   if (!c || typeof c !== "object") throw new Error("Show settings are missing.");
+  const videoUrl = youtubeUrl(c.videoUrl, "video URL");
+  const preshowVideoUrl = youtubeUrl(c.preshowVideoUrl, "preshow video URL");
+  const videoEvent = !!videoUrl;
+  if (videoEvent) {
+    if (!finite(c.duration, .1, 14400)) throw new Error("Track duration must be between 0.1 seconds and four hours.");
+    if (c.preshowStartSeconds !== undefined && !finite(c.preshowStartSeconds, 0, 14400)) throw new Error("Invalid preshow start offset.");
+    if (c.scheduledStart !== undefined && !finite(c.scheduledStart, 1e12, 4e12)) throw new Error("Invalid scheduled start.");
+  } else {
   for (const key of [c.artistKey, c.animationKey, c.audioKey])
     if (typeof key !== "string" || !/^events\/[a-f0-9]{64}\/(artist\.ska|animation\.glb|track\.(ogg|mp3|wav))$/.test(key)) throw new Error("Upload the artist, animation GLB and audio first.");
   if (!c.artistKey.endsWith('/artist.ska') || !c.animationKey.endsWith('/animation.glb') || !/\/track\.(ogg|mp3|wav)$/.test(c.audioKey)) throw new Error("Show asset types do not match.");
+  }
   for (const flag of [c.stageAudio,c.lightSticks])
     if (flag !== undefined && typeof flag !== "boolean") throw new Error("Stage audio and light sticks must be enabled or disabled.");
   for (const key of [c.stageAudioLeftKey,c.stageAudioRightKey,c.introAudioKey])
     if (key != null && (typeof key !== "string" || !/^events\/[a-f0-9]{64}\/track\.(ogg|mp3|wav)$/.test(key))) throw new Error("Upload valid stage and intro audio tracks.");
   if (c.stageAudio && (!c.stageAudioLeftKey || !c.stageAudioRightKey)) throw new Error("Stage audio requires both left and right mono tracks.");
   if (c.stageAudioGainDb !== undefined && !finite(c.stageAudioGainDb,-30,0)) throw new Error("Stage audio gain must be between -30 and 0 dB.");
+  if (!videoEvent) {
   if (typeof c.clip !== "string" || !c.clip.trim() || c.clip.length > 200) throw new Error("Choose an animation clip.");
   if (!finite(c.duration, .1, 14400)) throw new Error("Track duration must be between 0.1 seconds and four hours.");
   if (!point(c.performer) || !finite(c.yaw, -360, 360) || !finite(c.scale, .1, 10)) throw new Error("Invalid performer placement.");
   if (!Array.isArray(c.cameras) || c.cameras.length < 1 || c.cameras.length > 256) throw new Error("Add between 1 and 256 camera points.");
+  }
   let previous = -1;
-  for (const shot of c.cameras) {
+  for (const shot of c.cameras ?? []) {
     if (!finite(shot.time, 0, c.duration) || shot.time <= previous || !point(shot.position) || !point(shot.target) || !finite(shot.fov, 10, 120)) throw new Error("Camera times must increase; positions, targets and FOV must be valid.");
     if (shot.position.every((n, i) => Math.abs(n - shot.target[i]!) < .001)) throw new Error("A camera cannot look at its own position.");
     previous = shot.time;
   }
-  if (c.cameras[0]!.time !== 0) throw new Error("The first camera point must start at zero.");
+  if (!videoEvent && c.cameras![0]!.time !== 0) throw new Error("The first camera point must start at zero.");
   if (c.performerPath && (!Array.isArray(c.performerPath) || c.performerPath.length > 256)) throw new Error("Too many performer path points.");
   previous = -1;
   for (const key of c.performerPath ?? []) {
@@ -87,18 +116,21 @@ export function validateShowConfig(value: unknown): ShowConfig {
   return { revealTime: c.revealTime ?? 0, effects: c.effects ?? [], stageAudio: c.stageAudio ?? false, stageAudioGainDb: c.stageAudioGainDb ?? -6, lightSticks: c.lightSticks ?? false,
     stageAudioLeftKey: c.stageAudioLeftKey ?? undefined, stageAudioRightKey: c.stageAudioRightKey ?? undefined, introAudioKey: c.introAudioKey ?? undefined,
     performerPath: c.performerPath ?? [], introKey: c.introKey, introDuration: c.introDuration, segments: c.segments ?? [], lights: c.lights ?? [], mouth: c.mouth ?? [], mouthGain: c.mouthGain ?? 1.3, mouthFps: c.mouthFps ?? 5, mouthRound: c.mouthRound ?? [], beats: c.beats ?? [], musicEnergy: c.musicEnergy ?? [], musicFps: c.musicFps ?? 25, artistKey: c.artistKey, animationKey: c.animationKey, audioKey: c.audioKey, clip: c.clip,
-    duration: c.duration, performer: c.performer, yaw: c.yaw, scale: c.scale, cameras: c.cameras };
+    duration: c.duration, performer: c.performer ?? [0, 0, 0], yaw: c.yaw ?? 0, scale: c.scale ?? 1, cameras: c.cameras ?? [],
+    videoUrl, preshowVideoUrl, preshowStartSeconds: c.preshowStartSeconds ?? 0, scheduledStart: c.scheduledStart };
 }
 
 /** Shared by create/edit so optional audio receives the same existence checks. */
 export function showAssetKeys(config: ShowConfig): string[] {
-  return [config.artistKey,config.animationKey,config.audioKey,
-    ...[config.introKey,config.stageAudioLeftKey,config.stageAudioRightKey,config.introAudioKey].filter((key): key is string => !!key)];
+  return [config.artistKey,config.animationKey,config.audioKey,config.introKey,config.stageAudioLeftKey,config.stageAudioRightKey,config.introAudioKey].filter((key): key is string => !!key);
 }
 
 /** Public URLs are derived from validated storage keys, never trusted from a draft. */
 export function serializeShowConfig(config: ShowConfig, publicUrl: (key: string) => string) {
-  return { ...config, artistUrl: publicUrl(config.artistKey), animationUrl: publicUrl(config.animationKey), audioUrl: publicUrl(config.audioKey),
+  return { ...config,
+    artistUrl: config.artistKey ? publicUrl(config.artistKey) : null,
+    animationUrl: config.animationKey ? publicUrl(config.animationKey) : null,
+    audioUrl: config.audioKey ? publicUrl(config.audioKey) : null,
     introUrl: config.introKey ? publicUrl(config.introKey) : null,
     stageAudioLeftUrl: config.stageAudioLeftKey ? publicUrl(config.stageAudioLeftKey) : null,
     stageAudioRightUrl: config.stageAudioRightKey ? publicUrl(config.stageAudioRightKey) : null,

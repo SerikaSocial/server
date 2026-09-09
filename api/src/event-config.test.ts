@@ -91,3 +91,18 @@ test("laser cue patterns survive saving and reject unknown patterns",()=>{
  expect(validateShowConfig({...config(),effects:[cue]}).effects).toEqual([cue]);
  for(const pattern of ["", "solid", null, 3])expect(()=>validateShowConfig({...config(),effects:[{...cue,pattern}]})).toThrow();
 });
+
+test("a YouTube watch-party does not need concert performer assets",()=>{
+ const video={duration:7200,videoUrl:"https://www.youtube.com/watch?v=9VIcgVU4f1E",preshowVideoUrl:"https://www.youtube.com/watch?v=S6C7og5g7Dc",preshowStartSeconds:1775,scheduledStart:1788962400000};
+ const saved=validateShowConfig(video);
+ expect(saved.videoUrl).toBe(video.videoUrl);
+ expect(saved.preshowVideoUrl).toBe(video.preshowVideoUrl);
+ expect(saved.preshowStartSeconds).toBe(1775);
+ expect(saved.scheduledStart).toBe(1788962400000);
+ expect(saved.cameras).toEqual([]);
+ expect(showAssetKeys(saved)).toEqual([]);
+ expect(serializeShowConfig(saved,key=>key).artistUrl).toBeNull();
+ expect(()=>validateShowConfig({...video,videoUrl:"http://youtube.com/watch?v=x"})).toThrow();
+ expect(()=>validateShowConfig({...video,videoUrl:"https://example.com/watch"})).toThrow();
+ expect(()=>validateShowConfig({duration:7200})).toThrow();
+});

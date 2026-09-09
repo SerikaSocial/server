@@ -80,9 +80,16 @@ interface TranscodeJob {
 
 const jobs = new Map<string, TranscodeJob>();
 
-function jobKey(url: string): string {
+function clipStartSeconds(value: unknown): number {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, 14400);
+}
+
+function jobKey(url: string, startSeconds = 0): string {
+  const ss = clipStartSeconds(startSeconds);
   return createHash("sha256")
-    .update(`${url}|h=${SERVER_MAX_HEIGHT}|s=${JOB_SEGMENT_SECONDS}|v1`)
+    .update(`${url}|h=${SERVER_MAX_HEIGHT}|s=${JOB_SEGMENT_SECONDS}|ss=${ss}|v1`)
     .digest("hex")
     .slice(0, 16);
 }
@@ -105,8 +112,9 @@ async function completeSegments(job: TranscodeJob): Promise<number> {
   return job.done ? count : count - 1;
 }
 
-async function startJob(url: string): Promise<TranscodeJob> {
-  const id = jobKey(url);
+async function startJob(url: string, startSeconds = 0): Promise<TranscodeJob> {
+  const ss = clipStartSeconds(startSeconds);
+  const id = jobKey(url, ss);
   const existing = jobs.get(id);
   if (existing) {
     existing.lastAccess = Date.now();
@@ -144,12 +152,16 @@ async function startJob(url: string): Promise<TranscodeJob> {
       const args: string[] = ["-y", "-threads", String(SERVER_ENCODE_THREADS)];
       if (resolved.headers["User-Agent"]) args.push("-user_agent", resolved.headers["User-Agent"]);
       if (resolved.headers.Referer) args.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
+      // Input seek so a watch-party preshow can skip the already-aired portion without
+      // uploading a trimmed Theora. Encoded segments still start at t=0.
+      if (ss > 0) args.push("-ss", String(ss));
       args.push("-i", track.url);
 
       const separateAudio = !track.hasAudio && Boolean(resolved.audioUrl);
       if (separateAudio && resolved.audioUrl) {
         if (resolved.headers["User-Agent"]) args.push("-user_agent", resolved.headers["User-Agent"]);
         if (resolved.headers.Referer) args.push("-headers", `Referer: ${resolved.headers.Referer}\r\n`);
+        if (ss > 0) args.push("-ss", String(ss));
         args.push("-i", resolved.audioUrl);
       }
       args.push("-map", separateAudio ? "0:v:0" : "0:v:0", "-map", separateAudio ? "1:a:0?" : "0:a:0?");
@@ -536,9 +548,10 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
       // a film someone already queued should also read the cache rather than re-encode.
       const url = (query.url ?? "").trim();
       if (!url) { set.status = 400; return { error: "missing_url" }; }
+      const startSeconds = clipStartSeconds(query.start);
 
       try {
-        const existing = jobs.get(jobKey(url));
+        const existing = jobs.get(jobKey(url, startSeconds));
         // The concurrency cap now limits *distinct* encodes, not viewers — attaching to a job
         // that already exists costs nothing, so it must never be refused.
         if (!existing && activeTranscodes >= MAX_CONCURRENT_TRANSCODES) {
@@ -546,7 +559,7 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
           return { error: "transcode_busy" };
         }
 
-        const job = await startJob(url);
+        const job = await startJob(url, startSeconds);
         await job.starting;
         job.lastAccess = Date.now();
 
@@ -567,7 +580,7 @@ export const videoRoutes = new Elysia({ prefix: "/v1/video" })
         return { error: e instanceof Error ? e.message : String(e) };
       }
     },
-    { query: t.Object({ url: t.String() }) },
+    { query: t.Object({ url: t.String(), start: t.Optional(t.String()) }) },
   )
   .get(
     "/segment/:id/:n",
