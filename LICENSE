@@ -1,0 +1,190 @@
+Serika.art Source Available License
+Version 1.0, January 2026
+
+Copyright (c) 2024-2026 Serika Development Team
+All Rights Reserved.
+
+================================================================================
+                              SOURCE AVAILABLE LICENSE
+================================================================================
+
+This license governs use of the accompanying software ("Software"). By accessing,
+viewing, downloading, or using the Software, you accept this license. If you do
+not accept this license, do not access or use the Software.
+
+--------------------------------------------------------------------------------
+1. DEFINITIONS
+--------------------------------------------------------------------------------
+
+"Software" means the source code, object code, documentation, and any associated
+materials provided in this repository.
+
+"You" means the individual or entity accessing or using the Software.
+
+"Commercial Use" means any use of the Software that is primarily intended for or
+directed toward commercial advantage or monetary compensation.
+
+"Derivative Work" means any work that is based on or incorporates the Software.
+
+"Deploy" means to make the Software available for access or use by any person
+other than You, whether over a network, on a server, or through any other means.
+
+--------------------------------------------------------------------------------
+2. GRANT OF RIGHTS
+--------------------------------------------------------------------------------
+
+Subject to the terms and conditions of this License, the copyright holder grants
+You a limited, non-exclusive, non-transferable, revocable license to:
+
+   a) VIEW and STUDY the Software source code for educational and personal
+      learning purposes.
+
+   b) FORK the repository on GitHub for personal, non-commercial experimentation
+      in a private environment that is not accessible to others.
+
+   c) SUBMIT bug reports, feature requests, and suggestions to the copyright
+      holder through the official repository.
+
+   d) REFERENCE the Software in academic papers, articles, or educational
+      materials, provided proper attribution is given.
+
+   e) DEPLOY the Software on a local network ("Local Deployment") for personal,
+      non-commercial use, provided that:
+      
+      i)   The Software is only accessible within Your private local network
+           (e.g., home network, internal corporate network) and is NOT exposed
+           to the public internet;
+      
+      ii)  No port forwarding, reverse proxies, tunneling services (such as
+           ngrok, Cloudflare Tunnel, or similar), or other methods are used to
+           make the Software accessible from outside the local network;
+      
+      iii) The deployment is for personal or household use only, not for
+           providing services to third parties;
+      
+      iv)  You do not charge any fees or receive compensation for access to the
+           locally deployed Software.
+
+--------------------------------------------------------------------------------
+3. RESTRICTIONS
+--------------------------------------------------------------------------------
+
+You may NOT, without prior written permission from the copyright holder:
+
+   a) USE the Software for any Commercial Use.
+
+   b) DEPLOY the Software in any publicly accessible manner, including but not
+      limited to hosting on public servers, cloud platforms, or any environment
+      accessible via the public internet. This restriction does not apply to
+      Local Deployments as defined in Section 2(e).
+
+   c) COPY, REPRODUCE, or DISTRIBUTE the Software or any portion thereof,
+      except as expressly permitted in Section 2.
+
+   d) MODIFY, ADAPT, or CREATE Derivative Works based on the Software for any
+      purpose other than personal, non-commercial experimentation.
+
+   e) SUBLICENSE, SELL, RENT, LEASE, or otherwise transfer rights to the
+      Software.
+
+   f) REMOVE, ALTER, or OBSCURE any copyright notices, license terms, or
+      attribution notices in the Software.
+
+   g) USE the Software to compete with, or create a service substantially
+      similar to, the official Serika.art platform.
+
+   h) INCORPORATE any portion of the Software into other software or services,
+      whether open source or proprietary.
+
+   i) USE the Software in any way that violates applicable laws or regulations.
+
+--------------------------------------------------------------------------------
+4. INTELLECTUAL PROPERTY
+--------------------------------------------------------------------------------
+
+   a) All intellectual property rights in the Software remain with the copyright
+      holder. This License does not grant You any ownership rights.
+
+   b) The names "Serika", "Serika.art", and associated logos and branding are
+      trademarks of the copyright holder and may not be used without permission.
+
+   c) Any feedback, suggestions, or contributions You provide may be used by the
+      copyright holder without any obligation to You.
+
+--------------------------------------------------------------------------------
+5. NO WARRANTY
+--------------------------------------------------------------------------------
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+--------------------------------------------------------------------------------
+6. LIMITATION OF LIABILITY
+--------------------------------------------------------------------------------
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
+CONSEQUENTIAL, OR PUNITIVE DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT
+OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
+IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+OF SUCH DAMAGE.
+
+--------------------------------------------------------------------------------
+7. TERMINATION
+--------------------------------------------------------------------------------
+
+   a) This License is effective until terminated.
+
+   b) Your rights under this License will terminate automatically without notice
+      if You fail to comply with any term of this License.
+
+   c) Upon termination, You must destroy all copies of the Software in Your
+      possession or control.
+
+   d) The copyright holder reserves the right to terminate this License at any
+      time for any reason.
+
+--------------------------------------------------------------------------------
+8. REQUESTING PERMISSION
+--------------------------------------------------------------------------------
+
+If You wish to use the Software in a way not permitted by this License, You may
+request permission by contacting:
+
+   Email: legal@serika.dev
+   Website: https://serika.art/contact
+
+Permission may be granted at the sole discretion of the copyright holder and may
+be subject to additional terms and conditions.
+
+--------------------------------------------------------------------------------
+9. MISCELLANEOUS
+--------------------------------------------------------------------------------
+
+   a) This License constitutes the entire agreement between You and the copyright
+      holder concerning the Software.
+
+   b) If any provision of this License is found to be unenforceable, the
+      remaining provisions will remain in full force and effect.
+
+   c) The failure of the copyright holder to enforce any provision of this
+      License shall not constitute a waiver of such provision.
+
+   d) This License shall be governed by and construed in accordance with the
+      laws of the jurisdiction in which the copyright holder resides, without
+      regard to conflict of law principles.
+
+   e) Any disputes arising under this License shall be resolved in the courts
+      of the jurisdiction in which the copyright holder resides.
+
+================================================================================
+
+For questions about this license, please contact legal@serika.dev
+
+================================================================================
