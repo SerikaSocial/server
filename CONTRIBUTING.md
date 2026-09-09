@@ -1,7 +1,7 @@
 # Contributing to Serika Social
 
 Thanks for your interest in contributing to Serika Social! This project is developed
-under the [Serika.art Source Available License](./LICENSE). Please read it before
+under the [Serika Source Available License](./LICENSE). Please read it before
 contributing — by submitting a contribution you accept that license.
 
 ## Before you start
@@ -92,6 +92,6 @@ faith.
 
 - **Issues:** the relevant `github.com/SerikaSocial/<repo>` repository.
 - **License / legal:** legal@serika.dev (see [`LICENSE`](./LICENSE) Section 8).
-- **General:** https://serika.art/contact
+- **General:** https://serika.pro/contact
 
 Thanks for helping make Serika Social better!
