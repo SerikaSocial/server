@@ -20,8 +20,12 @@ import { reportRoutes, adminReportRoutes } from "./routes/reports.ts";
 import { publicUserRoutes, authedUserRoutes } from "./routes/users.ts";
 import { notificationRoutes } from "./routes/notifications.ts";
 import { startInstanceSweep } from "./routes/instances.ts";
+import { startEventCompletion } from "./event-lifecycle.ts";
 
+let stopEventCompletion: (() => void) | undefined;
 const app = new Elysia()
+  .onStart(() => { stopEventCompletion = startEventCompletion(prisma); })
+  .onStop(() => { stopEventCompletion?.(); })
   .use(cors())
   // Health check doubles as a liveness probe for Coolify and a datastore smoke test.
   .get("/health", async () => {
