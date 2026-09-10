@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Elysia, t } from "elysia";
 import { prisma } from "../db.ts";
-import { assetPublicUrl, putBytes } from "../storage.ts";
+import { assetPublicUrl, putBytes, presignPut, storageConfigured } from "../storage.ts";
 import { authed, adminOnly } from "../auth-plugin.ts";
 import { config } from "../config.ts";
 
@@ -15,8 +15,11 @@ import { config } from "../config.ts";
 
 const HUB_PLATFORMS = [
   "windows-x86_64",
+  "windows-arm64",
   "linux-x86_64",
+  "linux-arm64",
   "macos-universal",
+  "macos-arm64",
   "android-quest-arm64",
   "android-mobile-arm64",
 ] as const;
@@ -45,22 +48,85 @@ export const hubRoutes = new Elysia({ prefix: "/v1/hub" })
         where: { publishedAt: { not: null } },
         orderBy: [{ pinned: "desc" }, { publishedAt: "desc" }],
         take,
-        include: { app: { select: { slug: true, name: true } } },
+        include: {
+          app: { select: { slug: true, name: true } },
+          author: { select: { username: true, avatarUrl: true } },
+          _count: { select: { comments: true } },
+        },
       });
       return {
         posts: posts.map((p) => ({
           id: p.id,
           slug: p.slug,
           title: p.title,
-          body: p.body,
+          // The list carries a teaser; the article view fetches the full body.
+          body: p.body.slice(0, 400),
           imageUrl: p.imageKey ? assetPublicUrl(p.imageKey) : null,
           pinned: p.pinned,
           publishedAt: p.publishedAt,
+          author: p.author ? { username: p.author.username, avatarUrl: p.author.avatarUrl } : null,
+          commentsCount: p._count.comments,
           app: p.app ?? undefined,
         })),
       };
     },
     { query: t.Object({ limit: t.Optional(t.String()) }) },
+  )
+
+  // The article view: one post, full body, author.
+  .get(
+    "/news/:slug",
+    async ({ params, set }) => {
+      const post = await prisma.newsPost.findUnique({
+        where: { slug: params.slug },
+        include: {
+          app: { select: { slug: true, name: true } },
+          author: { select: { username: true, avatarUrl: true } },
+        },
+      });
+      if (!post || !post.publishedAt || post.publishedAt > new Date()) {
+        set.status = 404;
+        return { error: "not_found" };
+      }
+      return {
+        post: {
+          id: post.id,
+          slug: post.slug,
+          title: post.title,
+          body: post.body,
+          imageUrl: post.imageKey ? assetPublicUrl(post.imageKey) : null,
+          pinned: post.pinned,
+          publishedAt: post.publishedAt,
+          author: post.author ? { username: post.author.username, avatarUrl: post.author.avatarUrl } : null,
+          app: post.app ?? undefined,
+        },
+      };
+    },
+    { params: t.Object({ slug: t.String() }) },
+  )
+
+  // Comments under an article. Public read; authed write below.
+  .get(
+    "/news/:slug/comments",
+    async ({ params }) => {
+      const post = await prisma.newsPost.findUnique({ where: { slug: params.slug }, select: { id: true } });
+      if (!post) return { comments: [] };
+      const rows = await prisma.newsComment.findMany({
+        where: { postId: post.id },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+        include: { user: { select: { username: true, avatarUrl: true, isPremium: true } } },
+      });
+      return {
+        comments: rows.map((c) => ({
+          id: c.id,
+          body: c.body,
+          createdAt: c.createdAt,
+          author: { username: c.user.username, avatarUrl: c.user.avatarUrl, isPremium: c.user.isPremium },
+        })),
+      };
+    },
+    { params: t.Object({ slug: t.String() }) },
   )
 
   .get(
@@ -342,6 +408,7 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
           iconKey: body.iconKey,
           kind: body.kind === "game" ? "game" : "app",
           homepage: body.homepage,
+          githubRepo: body.githubRepo,
           visible: body.visible ?? false,
         },
       });
@@ -355,6 +422,7 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
         iconKey: t.Optional(t.String()),
         kind: t.Optional(t.String()),
         homepage: t.Optional(t.String()),
+        githubRepo: t.Optional(t.String()),
         visible: t.Optional(t.Boolean()),
       }),
     },
@@ -372,6 +440,7 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
           iconKey: body.iconKey ?? undefined,
           kind: body.kind === "game" ? "game" : body.kind === "app" ? "app" : undefined,
           homepage: body.homepage ?? undefined,
+          githubRepo: body.githubRepo ?? undefined,
           visible: body.visible ?? undefined,
         },
       });
@@ -385,6 +454,7 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
         iconKey: t.Optional(t.String()),
         kind: t.Optional(t.String()),
         homepage: t.Optional(t.String()),
+        githubRepo: t.Optional(t.String()),
         visible: t.Optional(t.Boolean()),
       }),
     },
@@ -410,13 +480,13 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
           channel: body.channel,
           platform: body.platform,
           url: body.url,
-          sha256: body.sha256.toLowerCase(),
+          sha256: (body.sha256 ?? "").toLowerCase(),
           sizeBytes: BigInt(body.sizeBytes ?? 0),
           notes: body.notes ?? "",
         },
         update: {
           url: body.url,
-          sha256: body.sha256.toLowerCase(),
+          sha256: (body.sha256 ?? "").toLowerCase(),
           sizeBytes: BigInt(body.sizeBytes ?? 0),
           notes: body.notes ?? "",
         },
@@ -430,7 +500,9 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
         channel: channelSchema,
         platform: platformSchema,
         url: t.String(),
-        sha256: t.String({ minLength: 64, maxLength: 64 }),
+        // Externally-hosted builds (GitHub releases and friends) may not publish a hash —
+        // an absent sha256 simply skips the Hub's download verification.
+        sha256: t.Optional(t.String({ minLength: 64, maxLength: 64 })),
         sizeBytes: t.Optional(t.Numeric()),
         notes: t.Optional(t.String({ maxLength: 20_000 })),
       }),
@@ -496,6 +568,177 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
         platform: platformSchema,
         notes: t.Optional(t.String({ maxLength: 20_000 })),
       }),
+    },
+  )
+
+  // News cover image: multipart, stored on B2 under news/. Returns the key for the post.
+  .post(
+    "/news-image",
+    async ({ body, set }) => {
+      const file = body.file as File;
+      if (!file || file.size === 0) { set.status = 400; return { error: "missing_file" }; }
+      if (file.size > 20 * 1024 * 1024) { set.status = 413; return { error: "too_large", maxBytes: 20 * 1024 * 1024 }; }
+      const ext = (file.name.match(/\.(png|jpe?g|webp|gif)$/i)?.[1] ?? "png").toLowerCase();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const hash = createHash("sha256").update(bytes).digest("hex");
+      const key = `news/${hash.slice(0, 2)}/${hash}.${ext}`;
+      await putBytes(key, bytes, file.type || "image/png");
+      return { key, url: assetPublicUrl(key) };
+    },
+    { body: t.Object({ file: t.File() }) },
+  )
+
+  // Large builds must not stream through the API (proxies cap request bodies), so the
+  // browser PUTs straight to storage: this issues the presigned URL, and /complete
+  // registers the release after the upload lands.
+  .post(
+    "/apps/:id/releases/upload-url",
+    async ({ params, body, set }) => {
+      if (!storageConfigured) { set.status = 503; return { error: "storage_not_configured" }; }
+      const app = await prisma.hubApp.findUnique({ where: { id: params.id }, select: { id: true, slug: true } });
+      if (!app) { set.status = 404; return { error: "app_not_found" }; }
+      if (body.sizeBytes > MAX_HUB_BUILD_BYTES) {
+        set.status = 413;
+        return { error: "too_large", maxBytes: MAX_HUB_BUILD_BYTES };
+      }
+      const safeName = body.fileName.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "build.bin";
+      const key = `hub/${app.slug}/${body.version}/${body.platform}/${safeName}`;
+      const uploadUrl = await presignPut(key, "application/octet-stream", 3600);
+      return { uploadUrl, key, expiresIn: 3600 };
+    },
+    {
+      params: t.Object({ id: t.String({ format: "uuid" }) }),
+      body: t.Object({
+        fileName: t.String({ maxLength: 200 }),
+        version: t.String({ minLength: 1, maxLength: 40 }),
+        channel: channelSchema,
+        platform: platformSchema,
+        sizeBytes: t.Numeric(),
+      }),
+    },
+  )
+  .post(
+    "/apps/:id/releases/upload-complete",
+    async ({ params, body, set }) => {
+      const app = await prisma.hubApp.findUnique({ where: { id: params.id }, select: { id: true, slug: true } });
+      if (!app) { set.status = 404; return { error: "app_not_found" }; }
+      const { headObject } = await import("../storage.ts");
+      const head = await headObject(body.key);
+      if (!head.exists) { set.status = 400; return { error: "upload_not_found" }; }
+      const release = await prisma.hubRelease.upsert({
+        where: { appId_channel_platform_version: {
+          appId: app.id, channel: body.channel, platform: body.platform, version: body.version,
+        } },
+        create: {
+          appId: app.id, version: body.version, channel: body.channel, platform: body.platform,
+          url: assetPublicUrl(body.key), sha256: (body.sha256 ?? "").toLowerCase(),
+          sizeBytes: BigInt(head.size ?? 0), notes: body.notes ?? "",
+        },
+        update: {
+          url: assetPublicUrl(body.key), sha256: (body.sha256 ?? "").toLowerCase(),
+          sizeBytes: BigInt(head.size ?? 0), notes: body.notes ?? "",
+        },
+      });
+      return { id: release.id, url: release.url, sizeBytes: Number(release.sizeBytes) };
+    },
+    {
+      params: t.Object({ id: t.String({ format: "uuid" }) }),
+      body: t.Object({
+        key: t.String({ maxLength: 400 }),
+        version: t.String({ minLength: 1, maxLength: 40 }),
+        channel: channelSchema,
+        platform: platformSchema,
+        sha256: t.Optional(t.String({ maxLength: 64 })),
+        notes: t.Optional(t.String({ maxLength: 20_000 })),
+      }),
+    },
+  )
+
+  // Import the latest GitHub release of app.githubRepo as stable HubReleases. This is how
+  // Serika Streaming publishes: push a release, hit sync, the Hub offers it.
+  .post(
+    "/apps/:id/sync-github",
+    async ({ params, body, set }) => {
+      const app = await prisma.hubApp.findUnique({ where: { id: params.id } });
+      if (!app) { set.status = 404; return { error: "app_not_found" }; }
+      const repo = (body?.repo ?? app.githubRepo ?? "").replace(/^https:\/\/github\.com\//, "").replace(/\/$/, "");
+      if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) { set.status = 400; return { error: "invalid_repo" }; }
+
+      const res = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+        headers: { "User-Agent": "SerikaHub/0.1", Accept: "application/vnd.github+json" },
+      });
+      if (!res.ok) { set.status = 502; return { error: "github_error", status: res.status }; }
+      const rel = await res.json() as { tag_name?: string; assets?: Array<{ name: string; size: number; browser_download_url: string }> };
+      const version = (rel.tag_name ?? "").replace(/^v/, "");
+      if (!version || !rel.assets?.length) { set.status = 502; return { error: "no_release_assets" }; }
+
+      // Asset name → platform. Best-priority asset wins per platform.
+      const priority = ["appimage", "exe", "dmg", "deb", "msi", "rpm", "zip"];
+      const matched = new Map<string, { name: string; size: number; url: string }>();
+      for (const asset of rel.assets) {
+        const n = asset.name.toLowerCase();
+        let platform: string | null = null;
+        if (/win/.test(n) && /arm64|aarch64/.test(n)) platform = "windows-arm64";
+        else if (/win|\.exe$|\.msi$/.test(n)) platform = "windows-x86_64";
+        else if (/linux|\.appimage$|\.deb$|\.rpm$/.test(n) && /arm64|aarch64/.test(n)) platform = "linux-arm64";
+        else if (/linux|\.appimage$|\.deb$|\.rpm$/.test(n)) platform = "linux-x86_64";
+        else if (/mac|darwin|\.dmg$/.test(n) && /arm64|aarch64/.test(n)) platform = "macos-arm64";
+        else if (/mac|darwin|\.dmg$/.test(n)) platform = "macos-universal";
+        if (!platform) continue;
+        const current = matched.get(platform);
+        const rank = (name: string) => { const i = priority.findIndex((p) => name.toLowerCase().includes(p)); return i === -1 ? 99 : i; };
+        if (!current || rank(asset.name) < rank(current.name)) {
+          matched.set(platform, { name: asset.name, size: asset.size, url: asset.browser_download_url });
+        }
+      }
+      if (matched.size === 0) { set.status = 502; return { error: "no_matching_assets" }; }
+
+      const created: string[] = [];
+      for (const [platform, asset] of matched) {
+        await prisma.hubRelease.upsert({
+          where: { appId_channel_platform_version: { appId: app.id, channel: "stable", platform, version } },
+          create: {
+            appId: app.id, version, channel: "stable", platform,
+            url: asset.url, sha256: "", sizeBytes: BigInt(asset.size),
+            notes: `${app.name} ${version} (${platform}) — imported from GitHub ${repo}.`,
+          },
+          update: { url: asset.url, sizeBytes: BigInt(asset.size) },
+        });
+        created.push(platform);
+      }
+      if (!app.githubRepo) await prisma.hubApp.update({ where: { id: app.id }, data: { githubRepo: repo } });
+      return { version, platforms: created };
+    },
+    {
+      params: t.Object({ id: t.String({ format: "uuid" }) }),
+      body: t.Optional(t.Object({ repo: t.Optional(t.String()) })),
+    },
+  );
+
+/// Comment POST lives on its own /v1/hub instance: it is authed, and hubRoutes is public.
+export const hubCommentRoutes = new Elysia({ prefix: "/v1/hub" })
+  .use(authed)
+  .post(
+    "/news/:slug/comments",
+    async ({ params, body, session, set }) => {
+      const post = await prisma.newsPost.findUnique({ where: { slug: params.slug }, select: { id: true } });
+      if (!post) { set.status = 404; return { error: "not_found" }; }
+      const comment = await prisma.newsComment.create({
+        data: { postId: post.id, userId: session.sub, body: body.body },
+        include: { user: { select: { username: true, avatarUrl: true, isPremium: true } } },
+      });
+      return {
+        comment: {
+          id: comment.id,
+          body: comment.body,
+          createdAt: comment.createdAt,
+          author: { username: comment.user.username, avatarUrl: comment.user.avatarUrl, isPremium: comment.user.isPremium },
+        },
+      };
+    },
+    {
+      params: t.Object({ slug: t.String() }),
+      body: t.Object({ body: t.String({ minLength: 1, maxLength: 2000 }) }),
     },
   );
 

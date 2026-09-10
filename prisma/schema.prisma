@@ -48,6 +48,7 @@ model User {
   notifications      Notification[] @relation("NotificationUser")
   notificationsCaused Notification[] @relation("NotificationActor")
   newsPosts          NewsPost[]     @relation("NewsPostAuthor")
+  newsComments       NewsComment[]  @relation("NewsCommentAuthor")
   hubVisits          UserWorldVisit[]
 
   @@index([lastSeen(sort: Desc)])
@@ -427,11 +428,28 @@ model NewsPost {
   authorId    String?   @map("author_id") @db.Uuid
   createdAt   DateTime  @default(now()) @map("created_at")
 
-  app    HubApp? @relation(fields: [appId], references: [id], onDelete: SetNull)
-  author User?   @relation("NewsPostAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  comments NewsComment[] @relation("NewsPostComments")
+  app     HubApp? @relation(fields: [appId], references: [id], onDelete: SetNull)
+  author  User?   @relation("NewsPostAuthor", fields: [authorId], references: [id], onDelete: SetNull)
 
   @@index([publishedAt(sort: Desc)])
   @@map("hub_news_posts")
+}
+
+/// An in-app comment on a news post. Authenticated users only; the Hub renders these
+/// under the article view.
+model NewsComment {
+  id        String   @id @default(uuid()) @db.Uuid
+  postId    String   @map("post_id") @db.Uuid
+  userId    String   @map("user_id") @db.Uuid
+  body      String   @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+
+  post NewsPost @relation("NewsPostComments", fields: [postId], references: [id], onDelete: Cascade)
+  user User     @relation("NewsCommentAuthor", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt(sort: Desc)])
+  @@map("hub_news_comments")
 }
 
 /// A Serika desktop app the Hub catalogues, installs and updates: Serika Social, Serika Moe
@@ -447,6 +465,9 @@ model HubApp {
   /// game | app
   kind     String  @default("app")
   homepage String?
+  /// GitHub "owner/repo" — the admin sync endpoint imports the latest release's assets
+  /// as HubRelease rows (this is how Serika Streaming publishes).
+  githubRepo String? @map("github_repo")
   /// Hidden from the public catalogue until an admin marks it visible.
   visible  Boolean @default(false)
 

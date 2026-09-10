@@ -20,7 +20,7 @@ import { adminSystemRoutes } from "./routes/admin-system.ts";
 import { reportRoutes, adminReportRoutes } from "./routes/reports.ts";
 import { publicUserRoutes, authedUserRoutes } from "./routes/users.ts";
 import { notificationRoutes } from "./routes/notifications.ts";
-import { hubRoutes, hubMeRoutes, hubAdminRoutes } from "./routes/hub.ts";
+import { hubRoutes, hubMeRoutes, hubCommentRoutes, hubAdminRoutes } from "./routes/hub.ts";
 import { startInstanceSweep } from "./routes/instances.ts";
 import { startEventCompletion } from "./event-lifecycle.ts";
 
@@ -64,6 +64,7 @@ const app = new Elysia()
   .use(authedUserRoutes)
   .use(notificationRoutes)
   .use(hubRoutes)
+  .use(hubCommentRoutes)
   .use(hubMeRoutes)
   .use(hubAdminRoutes)
   .onError(({ code, error, set }) => {
