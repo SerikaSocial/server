@@ -27,6 +27,12 @@ const KNOWN_ROLES = new Set([
   "rightLittleProximal", "rightLittleIntermediate", "rightLittleDistal",
 ]);
 
+export interface ToggleMeta {
+  name: string;
+  defaultOn: boolean;
+  saved: boolean;
+}
+
 export interface SkaMeta {
   name: string;
   author: string;
@@ -35,6 +41,7 @@ export interface SkaMeta {
   heightMeters: number;
   eyeHeightMeters: number;
   humanoid: Record<string, string>;
+  toggles?: ToggleMeta[];
 }
 
 export type UploadKind = "vrm" | "glb" | "fbx" | "pmx" | "unitypackage" | "unknown";
@@ -90,6 +97,93 @@ function readGlbJson(bytes: Uint8Array): any {
   if (chunkType !== JSON_CHUNK) throw new Error("first GLB chunk is not JSON");
   const jsonBytes = bytes.subarray(20, 20 + chunkLen);
   return JSON.parse(new TextDecoder("utf-8").decode(jsonBytes));
+}
+
+/// Rebuild a GLB with a modified JSON chunk. The binary chunk is carried over unchanged.
+/// Used to strip problematic extensions (e.g. KHR_texture_transform with default values that
+/// some importers — including Godot's — choke on) without re-encoding the binary payload.
+function rewriteGlbJson(bytes: Uint8Array, modifier: (gltf: any) => void): Uint8Array {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const chunkLen = dv.getUint32(12, true);
+  const jsonBytes = bytes.subarray(20, 20 + chunkLen);
+  const gltf = JSON.parse(new TextDecoder("utf-8").decode(jsonBytes));
+  modifier(gltf);
+  const newJson = Buffer.from(JSON.stringify(gltf), "utf-8");
+  // Pad JSON to 4-byte alignment with spaces (glTF spec).
+  const padLen = (4 - (newJson.length % 4)) % 4;
+  const paddedJson = Buffer.concat([newJson, Buffer.alloc(padLen, 0x20)]);
+  // Binary chunk starts right after the JSON chunk.
+  const binHeaderOff = 20 + chunkLen;
+  const binChunkLen = dv.getUint32(binHeaderOff, true);
+  const binChunkType = dv.getUint32(binHeaderOff + 4, true);
+  const binData = bytes.subarray(binHeaderOff + 8, binHeaderOff + 8 + binChunkLen);
+  // Rebuild GLB: header (12) + JSON chunk (8 + jsonLen) + BIN chunk (8 + binLen).
+  const totalLen = 12 + 8 + paddedJson.length + 8 + binData.length;
+  const out = Buffer.alloc(totalLen);
+  out.write("glTF", 0, "latin1");
+  out.writeUInt32LE(2, 4); // version
+  out.writeUInt32LE(totalLen, 8); // total length
+  out.writeUInt32LE(paddedJson.length, 12); // JSON chunk length
+  out.writeUInt32LE(JSON_CHUNK, 16); // JSON chunk type
+  paddedJson.copy(out, 20);
+  const binOff = 20 + paddedJson.length;
+  out.writeUInt32LE(binData.length, binOff);
+  out.writeUInt32LE(binChunkType, binOff + 4);
+  Buffer.from(binData).copy(out, binOff + 8);
+  return out as Uint8Array;
+}
+
+/// Strip KHR_texture_transform from all texture references when it carries only default values
+/// (offset [0,0], scale [1,1], rotation 0). Some GLB exporters — including VRoid Hub's VRM
+/// pipeline — emit this extension on every texture even when it is a no-op, and Godot's glTF
+/// importer can fail to load textures that carry it.
+function stripDefaultTextureTransform(glb: Uint8Array): Uint8Array {
+  try {
+    return rewriteGlbJson(glb, (gltf) => {
+      const materials = gltf.materials ?? [];
+      for (const mat of materials) {
+        const pbr = mat.pbrMetallicRoughness;
+        if (pbr?.baseColorTexture?.extensions?.KHR_texture_transform) {
+          const tt = pbr.baseColorTexture.extensions.KHR_texture_transform;
+          const isDefault =
+            (!tt.offset || (tt.offset[0] === 0 && tt.offset[1] === 0)) &&
+            (!tt.scale || (tt.scale[0] === 1 && tt.scale[1] === 1)) &&
+            (!tt.rotation || tt.rotation === 0);
+          if (isDefault) delete pbr.baseColorTexture.extensions.KHR_texture_transform;
+          if (Object.keys(pbr.baseColorTexture.extensions).length === 0)
+            delete pbr.baseColorTexture.extensions;
+        }
+      }
+    });
+  } catch {
+    return glb; // if rewrite fails, return the original GLB unchanged
+  }
+}
+
+/// Auto-detect avatar toggles from material names. Looks for common prop/accessory keywords
+/// (Shield, Sword, Weapon, Hat, Glasses, Cape, etc.) in material names and creates a toggle
+/// for each unique keyword found. The client's toggle system matches by material name to
+/// hide/show individual mesh surfaces.
+function autoDetectToggles(gltf: any): ToggleMeta[] {
+  const KEYWORDS = [
+    "Shield", "Sword", "Weapon", "Spear", "Bow", "Axe", "Staff", "Wand",
+    "Hat", "Crown", "Helmet", "Glasses", "Mask", "Cape", "Cloak",
+    "Backpack", "Wings", "Horns", "Tail", "Earring", "Necklace",
+  ];
+  const found = new Map<string, ToggleMeta>();
+  for (const mat of gltf.materials ?? []) {
+    const name = (mat.name ?? "").toLowerCase();
+    for (const kw of KEYWORDS) {
+      if (name.includes(kw.toLowerCase())) {
+        // Capitalize for the display name.
+        const display = kw;
+        if (!found.has(display)) {
+          found.set(display, { name: display, defaultOn: true, saved: false });
+        }
+      }
+    }
+  }
+  return [...found.values()];
 }
 
 function nodeName(gltf: any, idx: number | undefined): string | null {
@@ -303,11 +397,14 @@ export function vrmOrGlbToSka(
   else if (ext.VRM) { sourceFormat = "vrm0"; faceYaw = 180; }
 
   const { height, eye } = measure(gltf, humanoid);
+  const toggles = autoDetectToggles(gltf);
   const meta: SkaMeta = {
     name, author, sourceFormat, faceYawDegrees: faceYaw,
     heightMeters: height, eyeHeightMeters: eye, humanoid,
+    toggles: toggles.length > 0 ? toggles : undefined,
   };
-  return { ska: buildSka(bytes, meta), meta };
+  const fixedGlb = stripDefaultTextureTransform(bytes);
+  return { ska: buildSka(fixedGlb, meta), meta };
 }
 
 /// Convert a PMX (Miku Miku Dance) file to `.ska`. Parses the PMX, converts to GLB,
