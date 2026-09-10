@@ -100,6 +100,11 @@ export const HostCall = {
   // whitelisted media
   SOUND_PLAY: 0x0200,
   SCREEN_SET_TEXT: 0x0201,
+  /// (screenSlot, number) -> 0. Sets the declared board's Label3D text to a NUMBER the script
+  /// computed — a timer, a score, a vote count. Without it boards can only ever show string
+  /// literals, which makes every dev-made minigame scoreboard blind. Same scope rules as
+  /// SCREEN_SET_TEXT: declared screens only, purely local presentation, no sync implications.
+  SCREEN_SET_NUMBER: 0x0202,
   // players (read-only transform, within world)
   PLAYER_COUNT: 0x0300,
   /// (playerIndex, axis) -> component. axis 0=x, 1=y, 2=z. Read-only: there is deliberately no
