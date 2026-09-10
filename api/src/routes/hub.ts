@@ -273,7 +273,15 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
       orderBy: [{ kind: "asc" }, { name: "asc" }],
       include: { releases: { orderBy: { publishedAt: "desc" } } },
     });
-    return { apps };
+    // Map explicitly: sizeBytes is a Prisma BigInt and Bun's JSON.stringify THROWS on
+    // BigInt — the first release published made this whole endpoint 500 (the admin panel
+    // then showed an empty catalogue while the Hub kept working off the mapped routes).
+    return {
+      apps: apps.map((a) => ({
+        ...a,
+        releases: a.releases.map((r) => ({ ...r, sizeBytes: Number(r.sizeBytes) })),
+      })),
+    };
   })
 
   // ── News ─────────────────────────────────────────────────────────────────
