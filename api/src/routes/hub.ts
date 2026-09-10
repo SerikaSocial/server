@@ -254,6 +254,23 @@ const newsPatchBody = t.Object({
 export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
   .use(adminOnly)
 
+  // Admin lists see drafts and hidden apps; the public routes only see published/visible.
+  .get("/news", async () => {
+    const posts = await prisma.newsPost.findMany({
+      orderBy: [{ pinned: "desc" }, { publishedAt: "desc" }, { createdAt: "desc" }],
+      take: 200,
+      include: { app: { select: { slug: true, name: true } } },
+    });
+    return { posts };
+  })
+  .get("/apps", async () => {
+    const apps = await prisma.hubApp.findMany({
+      orderBy: [{ kind: "asc" }, { name: "asc" }],
+      include: { releases: { orderBy: { publishedAt: "desc" } } },
+    });
+    return { apps };
+  })
+
   // ── News ─────────────────────────────────────────────────────────────────
   .post(
     "/news",
