@@ -8,6 +8,7 @@ import { sessionRoutes } from "./routes/session.ts";
 import { webAuthRoutes } from "./routes/web-auth.ts";
 import { worldRoutes, worldUploadRoutes } from "./routes/worlds.ts";
 import { instanceRoutes } from "./routes/instances.ts";
+import { gameRoutes } from "./routes/games.ts";
 import { assetRoutes } from "./routes/assets.ts";
 import { friendRoutes } from "./routes/social.ts";
 import { avatarPublicRoutes, assetFileRoutes, avatarRoutes, adminRoutes } from "./routes/avatars.ts";
@@ -44,6 +45,7 @@ const app = new Elysia()
   .use(worldRoutes)
   .use(worldUploadRoutes)
   .use(instanceRoutes)
+  .use(gameRoutes)
   .use(assetRoutes)
   .use(friendRoutes)
   .use(avatarPublicRoutes)
