@@ -4,6 +4,7 @@ import { authed } from "../auth-plugin.ts";
 import { signTicket } from "../tokens.ts";
 import { place } from "../allocator.ts";
 import { canAccessInstance, worldJoinGate, InstanceAccess } from "../instance-access.ts";
+import { recordWorldVisit } from "./hub.ts";
 
 /// Check maintenance mode — returns true if the flag is set in Redis. Admins bypass it.
 export async function isMaintenance(userId: string): Promise<boolean> {
@@ -97,6 +98,9 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
         set.status = 500;
         return { error: "ticket_failed" };
       }
+      // The Hub renders recent worlds from this — recorded here so the client
+      // never reports its own history.
+      void recordWorldVisit(session.sub, world.id);
 
       return {
         instance: serializeInstance(instance),
@@ -174,6 +178,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
         set.status = 500;
         return { error: "ticket_failed" };
       }
+      void recordWorldVisit(session.sub, world.id);
       return {
         instance: serializeInstance(chosen),
         endpoint: chosen.endpoint,
@@ -213,6 +218,7 @@ export const instanceRoutes = new Elysia({ prefix: "/v1/instances" })
       set.status = 500;
       return { error: "ticket_failed" };
     }
+    void recordWorldVisit(session.sub, instance.worldId);
     return { instance: serializeInstance(instance), endpoint: instance.endpoint, worldName: world!.name, ...ticket };
   })
 

@@ -47,6 +47,8 @@ model User {
   reportsResolved Report[] @relation("ReportResolver")
   notifications      Notification[] @relation("NotificationUser")
   notificationsCaused Notification[] @relation("NotificationActor")
+  newsPosts          NewsPost[]     @relation("NewsPostAuthor")
+  hubVisits          UserWorldVisit[]
 
   @@index([lastSeen(sort: Desc)])
   @@map("users")
@@ -406,4 +408,89 @@ model LiveEvent {
   instances Instance[]
   @@index([status])
   @@map("live_events")
+}
+
+/// A Hub news post / announcement (markdown body). Drafts have publishedAt = null and are
+/// only visible through the admin API; publishing sets the timestamp.
+model NewsPost {
+  id          String    @id @default(uuid()) @db.Uuid
+  slug        String    @unique
+  title       String
+  body        String
+  /// Optional CDN key of a cover image.
+  imageKey    String?   @map("image_key")
+  /// Optional HubApp this post announces (a release announcement links its app).
+  appId       String?   @map("app_id") @db.Uuid
+  pinned      Boolean   @default(false)
+  /// Null = draft, hidden from the public list.
+  publishedAt DateTime? @map("published_at")
+  authorId    String?   @map("author_id") @db.Uuid
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  app    HubApp? @relation(fields: [appId], references: [id], onDelete: SetNull)
+  author User?   @relation("NewsPostAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([publishedAt(sort: Desc)])
+  @@map("hub_news_posts")
+}
+
+/// A Serika desktop app the Hub catalogues, installs and updates: Serika Social, Serika Moe
+/// desktop, future apps. Rows are data — the Hub treats them all through the same
+/// HubApp/HubRelease contract, no special cases.
+model HubApp {
+  id       String  @id @default(uuid()) @db.Uuid
+  slug     String  @unique
+  name     String
+  blurb    String  @default("")
+  /// Optional CDN key of the app icon.
+  iconKey  String? @map("icon_key")
+  /// game | app
+  kind     String  @default("app")
+  homepage String?
+  /// Hidden from the public catalogue until an admin marks it visible.
+  visible  Boolean @default(false)
+
+  news     NewsPost[]
+  releases HubRelease[]
+
+  @@map("hub_apps")
+}
+
+/// One distributable build of a HubApp on one platform/channel. This is what makes the Hub
+/// update ANY Serika desktop app — including Serika Social itself — via the same
+/// stage → verify → swap contract the in-game updater uses.
+model HubRelease {
+  id          String   @id @default(uuid()) @db.Uuid
+  appId       String   @map("app_id") @db.Uuid
+  version     String
+  /// stable | beta | nightly
+  channel     String   @default("stable")
+  /// windows-x86_64 | linux-x86_64 | macos-universal | android-quest-arm64 | android-mobile-arm64
+  platform    String
+  /// Absolute CDN URL (or CDN key) the Hub downloads from.
+  url         String
+  sha256      String
+  sizeBytes   BigInt   @default(0) @map("size_bytes")
+  notes       String   @default("")
+  publishedAt DateTime @default(now()) @map("published_at")
+
+  app HubApp @relation(fields: [appId], references: [id], onDelete: Cascade)
+
+  @@unique([appId, channel, platform, version])
+  @@index([appId, platform, publishedAt(sort: Desc)])
+  @@map("hub_releases")
+}
+
+/// Recent-worlds history for the Hub's Home tab. Upserted by the instance-join paths —
+/// the client never reports it. The newest 50 distinct worlds per user are kept.
+model UserWorldVisit {
+  userId    String   @map("user_id") @db.Uuid
+  worldId   String   @map("world_id") @db.Uuid
+  visitedAt DateTime @default(now()) @map("visited_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, worldId])
+  @@index([userId, visitedAt(sort: Desc)])
+  @@map("user_world_visits")
 }

@@ -9,6 +9,7 @@ import { validateBundle, ReviewStatus } from "../review.ts";
 import { audit } from "../audit.ts";
 import { worldJoinGate } from "../instance-access.ts";
 import { isMaintenance, mintTicket, serializeInstance } from "./instances.ts";
+import { recordWorldVisit } from "./hub.ts";
 import { place } from "../allocator.ts";
 
 function serialize(e: any, admin = false) {
@@ -28,10 +29,14 @@ export const eventRoutes = new Elysia({ prefix: "/v1/events" }).use(authed).onBe
   }, { params: t.Object({ id: t.String({ format: "uuid" }) }) })
   .post("/:id/join", async ({ params, session, set }) => {
     if (await isMaintenance(session.sub)) { set.status = 503; return { error: "maintenance" }; }
+    // Set inside the transaction once the event is known good; the visit is recorded
+    // AFTER it commits — history must never hold the row lock.
+    let visitedWorldId: string | null = null;
     const result = await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT id FROM live_events WHERE id = ${params.id}::uuid FOR UPDATE`;
       const event = await tx.liveEvent.findUnique({ where: { id: params.id }, include: { world: true } });
       if (!event || !["open", "live"].includes(event.status)) return { error: "event_closed" };
+      visitedWorldId = event.worldId;
       const gate = await worldJoinGate(event.world, session.sub, false, true);
       if (gate) return { error: gate };
       const open = await tx.instance.findMany({ where: { eventId: event.id, closedAt: null }, orderBy: { createdAt: "asc" } });
@@ -57,6 +62,7 @@ export const eventRoutes = new Elysia({ prefix: "/v1/events" }).use(authed).onBe
       return { instance: serializeInstance(chosen), endpoint: chosen.endpoint, worldName: event.world.name, eventId: event.id, ...ticket };
     }, { timeout: 15000 });
     if ("error" in result) set.status = result.error === "no_relay_available" ? 503 : 409;
+    if (!("error" in result) && visitedWorldId) void recordWorldVisit(session.sub, visitedWorldId);
     return result;
   }, { params: t.Object({ id: t.String({ format: "uuid" }) }) });
 
