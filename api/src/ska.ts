@@ -139,11 +139,17 @@ function rewriteGlbJson(bytes: Uint8Array, modifier: (gltf: any) => void): Uint8
 /// 2. Fix materials where baseColorFactor has alpha=0 (fully transparent) despite having a valid
 ///    baseColorTexture — some exporters / VRChat avatars zero out alpha for toggleable props,
 ///    which causes alpha-scissor / toon shaders to discard the entire surface as invisible.
+/// 3. Strip KHR_materials_unlit so the model receives real scene lighting, toon shading, and outlines.
 function sanitizeGlbMaterials(glb: Uint8Array): Uint8Array {
   try {
     return rewriteGlbJson(glb, (gltf) => {
       const materials = gltf.materials ?? [];
       for (const mat of materials) {
+        // Strip KHR_materials_unlit so materials participate in lighting and toon shading
+        if (mat.extensions?.KHR_materials_unlit) {
+          delete mat.extensions.KHR_materials_unlit;
+          if (Object.keys(mat.extensions).length === 0) delete mat.extensions;
+        }
         const pbr = mat.pbrMetallicRoughness;
         if (pbr) {
           // Fix transparent baseColorFactor when a texture is present
@@ -161,6 +167,16 @@ function sanitizeGlbMaterials(glb: Uint8Array): Uint8Array {
               delete pbr.baseColorTexture.extensions;
           }
         }
+      }
+      if (Array.isArray(gltf.extensionsUsed)) {
+        gltf.extensionsUsed = gltf.extensionsUsed.filter(
+          (e: string) => e !== "KHR_materials_unlit" && e !== "KHR_texture_transform"
+        );
+      }
+      if (Array.isArray(gltf.extensionsRequired)) {
+        gltf.extensionsRequired = gltf.extensionsRequired.filter(
+          (e: string) => e !== "KHR_materials_unlit" && e !== "KHR_texture_transform"
+        );
       }
     });
   } catch {
