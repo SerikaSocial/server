@@ -35,10 +35,18 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
       }),
     ]);
 
-    const friends = accepted.map((f) => {
+    const friends = await Promise.all(accepted.map(async (f) => {
       const other = f.userAId === session.sub ? f.userB : f.userA;
-      return { id: other.id, username: other.username, displayName: other.displayName, avatarUrl: other.avatarUrl };
-    });
+      const instanceId = await redis.get(keys.userPresence(other.id));
+      return {
+        id: other.id,
+        username: other.username,
+        displayName: other.displayName,
+        avatarUrl: other.avatarUrl,
+        online: Boolean(instanceId),
+        activity: instanceId ? { product: "social", instanceId } : null,
+      };
+    }));
 
     const incoming = pending
       .filter((f) => f.requestedById !== session.sub)

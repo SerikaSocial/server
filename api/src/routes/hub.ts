@@ -505,9 +505,9 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
         data: {
           title: body.title ?? undefined,
           body: body.body ?? undefined,
-          imageKey: body.imageKey ?? undefined,
-          appId: body.appId ?? undefined,
           pinned: body.pinned ?? undefined,
+          ...clearable("imageKey", body.imageKey),
+          ...(body.appId === undefined ? {} : { appId: body.appId.trim() === "" ? null : body.appId }),
           // publish:true stamps the timestamp on a draft; publish:false unpublishes.
           ...(body.publish !== undefined ? { publishedAt: body.publish ? (existing.publishedAt ?? new Date()) : null } : {}),
         },
