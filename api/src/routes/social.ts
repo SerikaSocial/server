@@ -3,6 +3,7 @@ import { authed } from "../auth-plugin.ts";
 import { prisma, redis, keys } from "../db.ts";
 import { canInviteToInstance, worldJoinGate } from "../instance-access.ts";
 import { notify } from "../notify.ts";
+import { syncFriend, unsyncFriend, syncFollow, unsyncFollow } from "../graph.ts";
 
 /// Friends, blocks, and social surface. M7.
 export const friendRoutes = new Elysia({ prefix: "/v1/social" })
@@ -38,13 +39,26 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
     const friends = await Promise.all(accepted.map(async (f) => {
       const other = f.userAId === session.sub ? f.userB : f.userA;
       const instanceId = await redis.get(keys.userPresence(other.id));
+      const activities: Array<{ product: string; label: string; instanceId?: string }> = [];
+      if (instanceId) {
+        const inst = await prisma.instance.findUnique({
+          where: { id: instanceId },
+          select: { world: { select: { name: true } } },
+        }).catch(() => null);
+        activities.push({
+          product: "social",
+          label: inst?.world?.name ? `In ${inst.world.name}` : "In Serika Social",
+          instanceId,
+        });
+      }
       return {
         id: other.id,
         username: other.username,
         displayName: other.displayName,
         avatarUrl: other.avatarUrl,
-        online: Boolean(instanceId),
-        activity: instanceId ? { product: "social", instanceId } : null,
+        online: activities.length > 0,
+        activity: activities[0] ?? null,
+        activities,
       };
     }));
 
@@ -90,6 +104,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
           where: { userAId_userBId: { userAId: a, userBId: b } },
           data: { status: 1 },
         });
+        void syncFriend(a, b, session.sub, 1);
         return { status: "accepted" };
       }
 
@@ -105,6 +120,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
       await prisma.friend.create({
         data: { userAId: a, userBId: b, requestedById: session.sub, status: 0 },
       });
+      void syncFriend(a, b, session.sub, 0);
 
       // Durable notification + live push. This used to be a bare `redis.publish`, which reached
       // the target only if they happened to be connected at that instant — a friend request sent
@@ -144,6 +160,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
         where: { userAId_userBId: { userAId: a, userBId: b } },
         data: { status: 1 },
       });
+      void syncFriend(a, b, existing.requestedById, 1);
 
       // Tell the requester their request landed — otherwise the only way to find out is to
       // notice the person has silently appeared in your friends list.
@@ -174,6 +191,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
     async ({ session, params }) => {
       const [a, b] = [session.sub, params.userId].sort();
       await prisma.friend.deleteMany({ where: { userAId: a, userBId: b } });
+      void unsyncFriend(a, b);
       return { status: "removed" };
     },
     { params: t.Object({ userId: t.String() }) },
@@ -192,6 +210,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
       // Remove any friendship.
       const [a, b] = [session.sub, params.userId].sort();
       await prisma.friend.deleteMany({ where: { userAId: a, userBId: b } });
+      void unsyncFriend(a, b);
       return { status: "blocked" };
     },
     { params: t.Object({ userId: t.String() }) },
@@ -237,6 +256,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
         create: { followerId: session.sub, followedId: params.userId },
         update: {},
       });
+      void syncFollow(session.sub, params.userId);
       return { status: "following" };
     },
     { params: t.Object({ userId: t.String() }) },
@@ -249,6 +269,7 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
       await prisma.follow.deleteMany({
         where: { followerId: session.sub, followedId: params.userId },
       });
+      void unsyncFollow(session.sub, params.userId);
       return { status: "unfollowed" };
     },
     { params: t.Object({ userId: t.String() }) },
@@ -275,6 +296,68 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
     });
     return { followers: follows.map((f) => f.follower) };
   })
+
+  // ── Direct messages ──────────────────────────────────────────────────────
+  // Hub Friends and in-game `/w user text` share this thread. Invites also write
+  // here so the join link shows up as a DM, not only as a notification.
+
+  .get("/dms/:userId", async ({ session, params }) => {
+    const rows = await prisma.directMessage.findMany({
+      where: {
+        OR: [
+          { fromId: session.sub, toId: params.userId },
+          { fromId: params.userId, toId: session.sub },
+        ],
+      },
+      orderBy: { createdAt: "asc" },
+      take: 200,
+      include: { from: { select: { id: true, username: true, displayName: true, avatarUrl: true } } },
+    });
+    return {
+      messages: rows.map((m) => ({
+        id: m.id,
+        from: m.from,
+        body: m.body,
+        createdAt: m.createdAt,
+        mine: m.fromId === session.sub,
+      })),
+    };
+  }, { params: t.Object({ userId: t.String() }) })
+
+  .post(
+    "/dms/:userId",
+    async ({ session, params, body, set }) => {
+      if (params.userId === session.sub) { set.status = 400; return { error: "cannot_dm_self" }; }
+      const target = await prisma.user.findUnique({ where: { id: params.userId }, select: { id: true } });
+      if (!target) { set.status = 404; return { error: "user_not_found" }; }
+      const blocked = await prisma.block.findFirst({
+        where: { OR: [
+          { userId: session.sub, blockedId: target.id },
+          { userId: target.id, blockedId: session.sub },
+        ] },
+      });
+      if (blocked) { set.status = 403; return { error: "blocked" }; }
+      const text = body.body.trim();
+      if (!text) { set.status = 400; return { error: "empty" }; }
+      const row = await prisma.directMessage.create({
+        data: { fromId: session.sub, toId: target.id, body: text.slice(0, 2000) },
+        include: { from: { select: { id: true, username: true, displayName: true, avatarUrl: true } } },
+      });
+      return {
+        message: {
+          id: row.id,
+          from: row.from,
+          body: row.body,
+          createdAt: row.createdAt,
+          mine: true,
+        },
+      };
+    },
+    {
+      params: t.Object({ userId: t.String() }),
+      body: t.Object({ body: t.String({ minLength: 1, maxLength: 2000 }) }),
+    },
+  )
 
   // ── User search ──────────────────────────────────────────────────────────
 
@@ -446,6 +529,15 @@ export const friendRoutes = new Elysia({ prefix: "/v1/social" })
         },
         expiresAt,
       });
+
+      const link = `serikasocial://world/${instance.world.id}`;
+      await prisma.directMessage.create({
+        data: {
+          fromId: session.sub,
+          toId: target.id,
+          body: `${who} invited you to ${instance.world.name}. ${link}`,
+        },
+      }).catch((e) => console.error("[social] invite dm failed", e));
 
       return { status: "sent", notificationId: row.id, expiresAt: expiresAt.toISOString() };
     },

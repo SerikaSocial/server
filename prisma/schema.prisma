@@ -48,6 +48,8 @@ model User {
   notifications      Notification[] @relation("NotificationUser")
   notificationsCaused Notification[] @relation("NotificationActor")
   newsPosts          NewsPost[]     @relation("NewsPostAuthor")
+  dmsSent            DirectMessage[] @relation("DmFrom")
+  dmsReceived        DirectMessage[] @relation("DmTo")
   newsComments       NewsComment[]  @relation("NewsCommentAuthor")
   hubVisits          UserWorldVisit[]
 
@@ -127,6 +129,23 @@ model Follow {
   @@id([followerId, followedId])
   @@index([followedId])
   @@map("follows")
+}
+
+/// Direct messages between two users. Canonical for the Hub and the in-game /w path;
+/// the same row is what an invite writes so a Chat/Hub DM carries the join link.
+model DirectMessage {
+  id        String   @id @default(uuid()) @db.Uuid
+  fromId    String   @map("from_id") @db.Uuid
+  toId      String   @map("to_id") @db.Uuid
+  body      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  from User @relation("DmFrom", fields: [fromId], references: [id], onDelete: Cascade)
+  to   User @relation("DmTo", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@index([fromId, toId, createdAt(sort: Desc)])
+  @@index([toId, createdAt(sort: Desc)])
+  @@map("direct_messages")
 }
 
 model World {

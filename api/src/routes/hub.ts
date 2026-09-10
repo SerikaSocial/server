@@ -302,7 +302,53 @@ export const hubRoutes = new Elysia({ prefix: "/v1/hub" })
         platform: t.Optional(t.String()),
       }),
     },
-  );
+  )
+
+  .get("/feed/art", async () => {
+    try {
+      const res = await fetch("https://serika.art/api/images?limit=24&ratings=safe&sort=popular", {
+        headers: { "User-Agent": "SerikaHub/0.1" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return { items: [] };
+      const data = await res.json() as { images?: Array<Record<string, unknown>> };
+      const items = (data.images ?? [])
+        .filter((img) => String(img.rating ?? "safe") === "safe")
+        .map((img) => ({
+          id: String(img.id ?? ""),
+          title: String((img as { username?: string }).username ?? "serika.art"),
+          thumbUrl: String(img.thumbnail_url ?? img.thumbnailUrl ?? img.url ?? ""),
+          url: `https://serika.art/image/${img.id}`,
+          source: "art",
+        }));
+      return { items };
+    } catch {
+      return { items: [] };
+    }
+  })
+
+  .get("/feed/gifs", async () => {
+    try {
+      const res = await fetch("https://gifs.serika.dev/api/gifs?limit=24", {
+        headers: { "User-Agent": "SerikaHub/0.1" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return { items: [] };
+      const data = await res.json() as { gifs?: Array<Record<string, unknown>> };
+      const items = (data.gifs ?? [])
+        .filter((g) => !g.isNsfw)
+        .map((g) => ({
+          id: String(g.id ?? ""),
+          title: String(g.title ?? g.slug ?? "GIF"),
+          thumbUrl: String(g.thumbnailUrl ?? g.url ?? ""),
+          url: `https://gifs.serika.dev/gif/${g.slug ?? g.id}`,
+          source: "gifs",
+        }));
+      return { items };
+    } catch {
+      return { items: [] };
+    }
+  });
 
 // Release channel/platform filters accept unknown strings (→ undefined) rather than
 // failing the request — a Hub built against a newer platform list must still list releases.
