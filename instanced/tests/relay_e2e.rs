@@ -238,3 +238,90 @@ async fn reconnect_from_new_address_replaces_the_old_session() {
     let _: () = mgr.del(format!("inst:{instance}:roster")).await.unwrap();
     for u in ["user-x", "user-obs"] { let _: () = mgr.del(format!("presence:{u}")).await.unwrap(); }
 }
+
+/// The SerikaScript channel: an emit reaches the whole instance, and the per-peer budget bounds a
+/// flood without dropping a legitimate burst.
+///
+/// Both halves matter. Fan-out is the feature; the budget is what keeps a script — which runs
+/// every tick — from turning one client into a broadcast amplifier aimed at everyone in the room.
+#[tokio::test]
+async fn script_events_fan_out_and_are_rate_limited() {
+    let redis_url = match std::env::var("REDIS_URL") {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("REDIS_URL unset — skipping e2e");
+            return;
+        }
+    };
+    let client = redis::Client::open(redis_url).unwrap();
+    let mut mgr = match redis::aio::ConnectionManager::new(client).await {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("redis unreachable ({e}) — skipping e2e");
+            return;
+        }
+    };
+
+    let instance = format!("test-script-{}", std::process::id());
+    let (jti_a, jti_b) = ("jti-script-a", "jti-script-b");
+    let _: () = mgr.set(format!("ticket:valid:{jti_a}"), &instance).await.unwrap();
+    let _: () = mgr.set(format!("ticket:valid:{jti_b}"), &instance).await.unwrap();
+
+    let server_sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let server_addr = server_sock.local_addr().unwrap();
+    let srv = Server::new(server_sock, mgr.clone(), SECRET, "test-node".into());
+    tokio::spawn(srv.run());
+
+    let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    a.connect(server_addr).await.unwrap();
+    let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    b.connect(server_addr).await.unwrap();
+
+    a.send(&write_hello(&mint(&instance, "user-sa", "alice", jti_a))).await.unwrap();
+    recv_typed(&a, 0x02, 4).await.expect("alice gets WELCOME");
+    b.send(&write_hello(&mint(&instance, "user-sb", "bob", jti_b))).await.unwrap();
+    recv_typed(&b, 0x02, 4).await.expect("bob gets WELCOME");
+    let join = recv_typed(&a, 0x03, 4).await.expect("alice sees bob join");
+    let _bob_id = u32::from_le_bytes([join[1], join[2], join[3], join[4]]);
+
+    // `[type][channel u16][payload f64]`
+    let emit = |channel: u16, payload: f64| {
+        let mut m = vec![0x0Du8];
+        m.extend_from_slice(&channel.to_le_bytes());
+        m.extend_from_slice(&payload.to_le_bytes());
+        m
+    };
+
+    a.send(&emit(7, 42.5)).await.unwrap();
+    let relayed = recv_typed(&b, 0x0D, 6).await.expect("bob receives alice's script event");
+    // [type][peer_id u32][channel u16][payload f64] = 15 bytes
+    assert_eq!(relayed.len(), 15, "script event body is fixed width");
+    let channel = u16::from_le_bytes([relayed[5], relayed[6]]);
+    let payload = f64::from_le_bytes(relayed[7..15].try_into().unwrap());
+    assert_eq!(channel, 7, "channel survives the relay verbatim");
+    assert_eq!(payload, 42.5, "payload survives the relay verbatim");
+
+    // A malformed body must be dropped, not relayed: the relay validates by exact length.
+    a.send(&[0x0Du8, 0x01, 0x00]).await.unwrap();
+    assert!(
+        recv_typed(&b, 0x0D, 2).await.is_none(),
+        "a short script event must be dropped, not forwarded"
+    );
+
+    // Flood well past the burst allowance. Some must arrive (a legitimate burst is allowed) and
+    // some must be dropped (the sustained rate is bounded) — asserting only one direction would
+    // pass with the limiter removed or with it stuck closed.
+    for i in 0..200 {
+        a.send(&emit(1, i as f64)).await.unwrap();
+    }
+    let mut got = 0;
+    while recv_typed(&b, 0x0D, 1).await.is_some() {
+        got += 1;
+        if got > 200 { break; }
+    }
+    assert!(got > 0, "the burst allowance must let some events through");
+    assert!(got < 200, "the sustained budget must drop part of a 200-event flood, got {got}");
+
+    let _: () = mgr.del(format!("inst:{instance}:roster")).await.unwrap();
+    for u in ["user-sa", "user-sb"] { let _: () = mgr.del(format!("presence:{u}")).await.unwrap(); }
+}

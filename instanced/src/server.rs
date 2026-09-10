@@ -38,6 +38,20 @@ const BW_BUDGET_BPS: u64 = 64 * 1024;
 /// instance at the API as fast as it can send datagrams.
 const AVATAR_ANNOUNCE_COOLDOWN: Duration = Duration::from_secs(3);
 
+/// Script-event budget, as a token bucket rather than a cooldown.
+///
+/// A world script runs `on_tick` every frame, so it can legitimately emit several events in one
+/// instant — progress and a finish time in the same tick — and then nothing for a minute. A flat
+/// minimum-gap rule (what AvatarChanged uses) would drop the second of a legitimate pair while
+/// still permitting a sustained 1-per-gap flood, which is exactly backwards. A bucket allows the
+/// burst and bounds the sustained rate, which is the shape of the actual traffic.
+const SCRIPT_EVENT_RATE: f32 = 20.0; // sustained events per second
+const SCRIPT_EVENT_BURST: f32 = 8.0; // instantaneous allowance
+
+/// `[channel: u16][payload: f64]`. Fixed width on purpose: no length field to lie about, and no
+/// allocation sized by attacker input.
+const SCRIPT_EVENT_BYTES: usize = 10;
+
 struct Peer {
     peer_id: u32,
     instance_id: String,
@@ -54,6 +68,9 @@ struct Peer {
     bw_window_start: Instant,
     /// Rate limit for AvatarChanged. Starts far enough in the past that the first one is allowed.
     last_avatar_announce: Instant,
+    /// Script-event token bucket: remaining allowance, and when it was last refilled.
+    script_tokens: f32,
+    last_script_refill: Instant,
 }
 
 pub struct Server {
@@ -114,6 +131,7 @@ impl Server {
             MsgType::Voice => self.handle_frame(MsgType::Voice, payload, from, validate_voice).await,
             MsgType::Chat => self.handle_chat(payload, from).await,
             MsgType::AvatarChanged => self.handle_avatar_changed(from).await,
+            MsgType::ScriptEvent => self.handle_script_event(payload, from).await,
             MsgType::ObjectSync => self.handle_object_sync(payload, from).await,
             MsgType::PhysGrab => self.handle_phys_grab(payload, from).await,
             MsgType::Ping => {
@@ -207,6 +225,8 @@ impl Server {
             bytes_sent: 0,
             bw_window_start: Instant::now(),
             last_avatar_announce: Instant::now() - AVATAR_ANNOUNCE_COOLDOWN,
+            script_tokens: SCRIPT_EVENT_BURST,
+            last_script_refill: Instant::now(),
         };
 
         let welcome = self.build_welcome(peer_id, &claims.instance_id, from);
@@ -359,6 +379,33 @@ impl Server {
         }
         let (peer_id, instance_id) = (peer.peer_id, peer.instance_id.clone());
         let out = write_relayed(MsgType::Chat, peer_id, payload);
+        self.broadcast(&instance_id, &out, Some(from)).await;
+    }
+
+    /// A world script's `NET_EMIT`, fanned out to the whole instance (no AOI — a round timer or a
+    /// score is not a local event, and a peer across the room needs it as much as one nearby).
+    ///
+    /// The server never interprets the channel or the payload; it re-frames and relays. Same
+    /// posture as `rms` in the pose codec: client-reported, untrusted, and never used to make a
+    /// server-side decision.
+    ///
+    /// The body must be EXACTLY 10 bytes. A fixed width means there is no length to disagree
+    /// about, and the sender cannot make the relay allocate.
+    async fn handle_script_event(&mut self, payload: &[u8], from: SocketAddr) {
+        let Some(peer) = self.peers.get_mut(&from) else { return };
+        peer.last_seen = Instant::now();
+        if payload.len() != SCRIPT_EVENT_BYTES { return; }
+
+        // Refill the bucket for elapsed time, then spend one token.
+        let now = Instant::now();
+        let elapsed = now.duration_since(peer.last_script_refill).as_secs_f32();
+        peer.last_script_refill = now;
+        peer.script_tokens = (peer.script_tokens + elapsed * SCRIPT_EVENT_RATE).min(SCRIPT_EVENT_BURST);
+        if peer.script_tokens < 1.0 { return; }
+        peer.script_tokens -= 1.0;
+
+        let (peer_id, instance_id) = (peer.peer_id, peer.instance_id.clone());
+        let out = write_relayed(MsgType::ScriptEvent, peer_id, payload);
         self.broadcast(&instance_id, &out, Some(from)).await;
     }
 

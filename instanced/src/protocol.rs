@@ -52,6 +52,21 @@ pub enum MsgType {
     /// Fanned out to the whole instance like Chat — AOI does not apply, since a peer across the
     /// room still has to stop rendering the old model.
     AvatarChanged = 0x0C,
+    /// client→server: `[channel: u16][payload: f64]` · server→client: `[peer_id: u32][channel: u16][payload: f64]`
+    ///
+    /// The SerikaScript network channel (`NET_EMIT`). Fanned out to the whole instance like Chat:
+    /// a script's game state — round timers, checkpoint progress, scores — has to reach everyone,
+    /// not just whoever is within AOI range.
+    ///
+    /// The payload is deliberately a single f64 and nothing else. The VM's stack is doubles, so
+    /// that is the whole of what a script can emit, and a fixed 10-byte body means there is no
+    /// length field to lie about and no allocation driven by attacker input. Rate-limited per peer
+    /// (`SCRIPT_EVENT_COOLDOWN`) because a script runs every tick and an unthrottled emit is a
+    /// broadcast amplifier aimed at the whole instance.
+    ///
+    /// The server never interprets the channel or the payload — same posture as `rms` in the pose
+    /// codec. It is relayed, not trusted.
+    ScriptEvent = 0x0D,
 }
 
 impl MsgType {
@@ -69,6 +84,7 @@ impl MsgType {
             0x0A => Self::ObjectSync,
             0x0B => Self::PhysGrab,
             0x0C => Self::AvatarChanged,
+            0x0D => Self::ScriptEvent,
             _ => return None,
         })
     }
