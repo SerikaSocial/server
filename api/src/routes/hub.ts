@@ -330,7 +330,10 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
     const posts = await prisma.newsPost.findMany({
       orderBy: [{ pinned: "desc" }, { publishedAt: "desc" }, { createdAt: "desc" }],
       take: 200,
-      include: { app: { select: { slug: true, name: true } } },
+      include: {
+        app: { select: { slug: true, name: true } },
+        author: { select: { username: true } },
+      },
     });
     return { posts };
   })
