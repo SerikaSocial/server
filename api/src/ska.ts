@@ -133,25 +133,33 @@ function rewriteGlbJson(bytes: Uint8Array, modifier: (gltf: any) => void): Uint8
   return out as Uint8Array;
 }
 
-/// Strip KHR_texture_transform from all texture references when it carries only default values
-/// (offset [0,0], scale [1,1], rotation 0). Some GLB exporters — including VRoid Hub's VRM
-/// pipeline — emit this extension on every texture even when it is a no-op, and Godot's glTF
-/// importer can fail to load textures that carry it.
-function stripDefaultTextureTransform(glb: Uint8Array): Uint8Array {
+/// Sanitize GLB materials:
+/// 1. Strip KHR_texture_transform from texture references when it is a no-op (default values),
+///    as Godot's glTF importer can fail to load textures that carry it.
+/// 2. Fix materials where baseColorFactor has alpha=0 (fully transparent) despite having a valid
+///    baseColorTexture — some exporters / VRChat avatars zero out alpha for toggleable props,
+///    which causes alpha-scissor / toon shaders to discard the entire surface as invisible.
+function sanitizeGlbMaterials(glb: Uint8Array): Uint8Array {
   try {
     return rewriteGlbJson(glb, (gltf) => {
       const materials = gltf.materials ?? [];
       for (const mat of materials) {
         const pbr = mat.pbrMetallicRoughness;
-        if (pbr?.baseColorTexture?.extensions?.KHR_texture_transform) {
-          const tt = pbr.baseColorTexture.extensions.KHR_texture_transform;
-          const isDefault =
-            (!tt.offset || (tt.offset[0] === 0 && tt.offset[1] === 0)) &&
-            (!tt.scale || (tt.scale[0] === 1 && tt.scale[1] === 1)) &&
-            (!tt.rotation || tt.rotation === 0);
-          if (isDefault) delete pbr.baseColorTexture.extensions.KHR_texture_transform;
-          if (Object.keys(pbr.baseColorTexture.extensions).length === 0)
-            delete pbr.baseColorTexture.extensions;
+        if (pbr) {
+          // Fix transparent baseColorFactor when a texture is present
+          if (pbr.baseColorFactor && pbr.baseColorFactor[3] <= 0.05 && pbr.baseColorTexture) {
+            pbr.baseColorFactor[3] = 1.0;
+          }
+          if (pbr.baseColorTexture?.extensions?.KHR_texture_transform) {
+            const tt = pbr.baseColorTexture.extensions.KHR_texture_transform;
+            const isDefault =
+              (!tt.offset || (tt.offset[0] === 0 && tt.offset[1] === 0)) &&
+              (!tt.scale || (tt.scale[0] === 1 && tt.scale[1] === 1)) &&
+              (!tt.rotation || tt.rotation === 0);
+            if (isDefault) delete pbr.baseColorTexture.extensions.KHR_texture_transform;
+            if (Object.keys(pbr.baseColorTexture.extensions).length === 0)
+              delete pbr.baseColorTexture.extensions;
+          }
         }
       }
     });
@@ -168,7 +176,7 @@ function autoDetectToggles(gltf: any): ToggleMeta[] {
   const KEYWORDS = [
     "Shield", "Sword", "Weapon", "Spear", "Bow", "Axe", "Staff", "Wand",
     "Hat", "Crown", "Helmet", "Glasses", "Mask", "Cape", "Cloak",
-    "Backpack", "Wings", "Horns", "Tail", "Earring", "Necklace",
+    "Backpack", "Wings", "Horns", "Tail", "Earring", "Necklace", "Sheath",
   ];
   const found = new Map<string, ToggleMeta>();
   for (const mat of gltf.materials ?? []) {
@@ -403,7 +411,7 @@ export function vrmOrGlbToSka(
     heightMeters: height, eyeHeightMeters: eye, humanoid,
     toggles: toggles.length > 0 ? toggles : undefined,
   };
-  const fixedGlb = stripDefaultTextureTransform(bytes);
+  const fixedGlb = sanitizeGlbMaterials(bytes);
   return { ska: buildSka(fixedGlb, meta), meta };
 }
 
