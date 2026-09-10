@@ -75,7 +75,8 @@ const app = new Elysia()
     set.status = set.status && set.status !== 200 ? set.status : 500;
     return { error: "internal_error" };
   })
-  .listen({ port: config.port, maxRequestBodySize: 256 * 1024 * 1024 });
+   // 512 MB: hub build uploads (a desktop release zip can exceed the old 256 MB world cap).
+  .listen({ port: config.port, maxRequestBodySize: 512 * 1024 * 1024 });
 
 console.log(`serika-social-api on :${config.port} → db ${config.databaseUrl.replace(/:[^:@]*@/, ":****@")}`);
 

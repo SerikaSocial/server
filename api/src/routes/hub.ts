@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { Elysia, t } from "elysia";
 import { prisma } from "../db.ts";
-import { assetPublicUrl } from "../storage.ts";
+import { assetPublicUrl, putBytes } from "../storage.ts";
 import { authed, adminOnly } from "../auth-plugin.ts";
 import { config } from "../config.ts";
 
@@ -21,6 +22,10 @@ const HUB_PLATFORMS = [
 ] as const;
 
 const HUB_CHANNELS = ["stable", "beta", "nightly"] as const;
+
+// A desktop build can be large (the Windows client ships at ~325 MB); the body limit in
+// index.ts is raised to match. Cap the STORED size below it so a bad request fails cleanly.
+const MAX_HUB_BUILD_BYTES = 500 * 1024 * 1024;
 
 // Elysia 1.1 has no t.UnionEnum; t.Union of literals validates the same set.
 const channelSchema = t.Union(HUB_CHANNELS.map((c) => t.Literal(c)));
@@ -426,7 +431,65 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
   .delete("/releases/:id", async ({ params }) => {
     await prisma.hubRelease.delete({ where: { id: params.id } });
     return { ok: true };
-  }, { params: t.Object({ id: t.String({ format: "uuid" }) }) });
+  }, { params: t.Object({ id: t.String({ format: "uuid" }) }) })
+
+  // Upload a build FILE for a release. This is the path for publishing Serika Moe or any
+  // third desktop app without shell access: pick the file in the admin pages and the API
+  // stores it on B2, hashes it and upserts the release row in one step. Externally-hosted
+  // builds keep using POST /apps/:id/releases with an explicit url + sha256.
+  .post(
+    "/apps/:id/releases/upload",
+    async ({ params, body, set }) => {
+      const app = await prisma.hubApp.findUnique({ where: { id: params.id }, select: { id: true, slug: true } });
+      if (!app) { set.status = 404; return { error: "app_not_found" }; }
+
+      const file = body.file as File;
+      if (!file || file.size === 0) { set.status = 400; return { error: "missing_file" }; }
+      if (file.size > MAX_HUB_BUILD_BYTES) {
+        set.status = 413;
+        return { error: "too_large", maxBytes: MAX_HUB_BUILD_BYTES };
+      }
+      const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120) || "build.bin";
+
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const sha256 = createHash("sha256").update(bytes).digest("hex");
+      const key = `hub/${app.slug}/${body.version}/${body.platform}/${safeName}`;
+      await putBytes(key, bytes, "application/octet-stream");
+
+      const release = await prisma.hubRelease.upsert({
+        where: { appId_channel_platform_version: {
+          appId: app.id, channel: body.channel, platform: body.platform, version: body.version,
+        } },
+        create: {
+          appId: app.id,
+          version: body.version,
+          channel: body.channel,
+          platform: body.platform,
+          url: assetPublicUrl(key),
+          sha256,
+          sizeBytes: BigInt(bytes.length),
+          notes: body.notes ?? "",
+        },
+        update: {
+          url: assetPublicUrl(key),
+          sha256,
+          sizeBytes: BigInt(bytes.length),
+          notes: body.notes ?? "",
+        },
+      });
+      return { id: release.id, url: release.url, sha256, sizeBytes: bytes.length };
+    },
+    {
+      params: t.Object({ id: t.String({ format: "uuid" }) }),
+      body: t.Object({
+        file: t.File(),
+        version: t.String({ minLength: 1, maxLength: 40 }),
+        channel: channelSchema,
+        platform: platformSchema,
+        notes: t.Optional(t.String({ maxLength: 20_000 })),
+      }),
+    },
+  );
 
 /// Called from the instance-join paths. Fire-and-forget: a history write must never
 /// delay or fail a join. Keeps the newest 50 distinct worlds per user.
