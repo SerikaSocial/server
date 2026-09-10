@@ -39,8 +39,18 @@ export interface SkaMeta {
 
 export type UploadKind = "vrm" | "glb" | "fbx" | "pmx" | "unitypackage" | "unknown";
 
+/// Decompress gzip bytes if the gzip magic (0x1F 0x8B) is present, otherwise return as-is.
+/// VRoid Hub serves VRM files gzip-compressed even though the extension is .vrm.
+export function maybeGunzip(bytes: Uint8Array): Uint8Array {
+  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    return Bun.gunzipSync(bytes as Uint8Array);
+  }
+  return bytes;
+}
+
 /// Sniff the uploaded bytes. FBX has a distinctive ASCII header; VRM/GLB share the glTF magic;
 /// PMX starts with "PMX "; unitypackage is a gzip tar archive (0x1F 0x8B).
+/// Gzip-compressed VRM (as served by VRoid Hub) is detected by peeking inside the gzip stream.
 export function sniffKind(bytes: Uint8Array, filename?: string): UploadKind {
   if (filename && filename.toLowerCase().endsWith(".unitypackage")) return "unitypackage";
   if (bytes.length >= 4) {
@@ -52,8 +62,18 @@ export function sniffKind(bytes: Uint8Array, filename?: string): UploadKind {
     const head = new TextDecoder("ascii").decode(bytes.subarray(0, 4));
     if (head === "PMX ") return "pmx";
   }
-  // Gzip magic (unitypackage is tar.gz)
+  // Gzip magic (0x1F 0x8B) — could be a unitypackage (tar.gz) or a gzip-compressed VRM.
+  // Peek inside to check: decompress a small prefix and look for the glTF magic.
   if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    try {
+      const decompressed = Bun.gunzipSync(bytes as Uint8Array);
+      if (decompressed.length >= 4) {
+        const innerMagic = new DataView(decompressed.buffer, decompressed.byteOffset, 4).getUint32(0, true);
+        if (innerMagic === GLB_MAGIC) return "glb"; // gzip-compressed VRM/GLB
+      }
+    } catch {
+      // Not a valid gzip stream or decompression failed — fall through to unitypackage
+    }
     return "unitypackage";
   }
   // Binary FBX starts with "Kaydara FBX Binary  ".

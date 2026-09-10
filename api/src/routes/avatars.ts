@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { authed, adminOnly } from "../auth-plugin.ts";
 import { prisma } from "../db.ts";
 import { putBytes, assetPublicUrl, imagePublicUrl, localAssetPath, getObjectBytes } from "../storage.ts";
-import { vrmOrGlbToSka, pmxToSka, sniffKind, extractThumbnail } from "../ska.ts";
+import { vrmOrGlbToSka, pmxToSka, sniffKind, extractThumbnail, maybeGunzip } from "../ska.ts";
 import { parsePMX } from "../pmx.ts";
 import { unzipSync } from "fflate";
 import { extname } from "node:path";
@@ -262,6 +262,9 @@ export const avatarRoutes = new Elysia({ prefix: "/v1/avatars" })
           set.status = 422;
           return { error: "zip_extraction_failed", detail: e instanceof Error ? e.message : String(e) };
         }
+      } else {
+        // Decompress gzip-compressed uploads (VRoid Hub serves VRMs gzip-compressed)
+        modelBytes = maybeGunzip(bytes);
       }
 
       const kind = sniffKind(modelBytes, file.name);
