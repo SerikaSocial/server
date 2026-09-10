@@ -459,12 +459,33 @@ model HubApp {
   id       String  @id @default(uuid()) @db.Uuid
   slug     String  @unique
   name     String
+  /// One line. This is the CARD text — keep it short; `description` is the store page.
   blurb    String  @default("")
-  /// Optional CDN key of the app icon.
+  /// Optional CDN key of the app icon: the small square mark, used in lists and shortcuts.
   iconKey  String? @map("icon_key")
+  /// Wide hero art (CDN key) for the store page and the Discover spotlight. Deliberately
+  /// separate from iconKey — a square icon stretched into a banner is what the procedural
+  /// SVG placeholders were papering over.
+  coverKey String? @map("cover_key")
+  /// Long-form markdown shown on the app's own page.
+  description String @default("")
+  /// Short marketing line under the name on the store page.
+  tagline  String  @default("")
+  developer String @default("")
+  publisher String @default("")
+  /// Ordered CDN keys. Postgres text[]; order is the display order.
+  screenshots String[] @default([])
+  /// Free-form category tags for browsing and filtering.
+  tags     String[] @default([])
   /// game | app
   kind     String  @default("app")
   homepage String?
+  supportUrl String? @map("support_url")
+  sourceUrl  String? @map("source_url")
+  /// External video URL for the store page hero.
+  trailerUrl String? @map("trailer_url")
+  /// Manual ordering in the catalogue; ties break on name.
+  sortOrder Int @default(0) @map("sort_order")
   /// GitHub "owner/repo" — the admin sync endpoint imports the latest release's assets
   /// as HubRelease rows (this is how Serika Streaming publishes).
   githubRepo String? @map("github_repo")

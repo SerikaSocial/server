@@ -135,7 +135,9 @@ export const hubRoutes = new Elysia({ prefix: "/v1/hub" })
       const take = Math.min(Number(query.limit ?? 50), 100);
       const apps = await prisma.hubApp.findMany({
         where: { visible: true },
-        orderBy: [{ kind: "asc" }, { name: "asc" }],
+        // sortOrder is the editorial hand: it decides what leads the Hub's Discover
+        // spotlight. Kind/name only break ties.
+        orderBy: [{ sortOrder: "asc" }, { kind: "asc" }, { name: "asc" }],
         take,
         include: {
           releases: {
@@ -156,7 +158,13 @@ export const hubRoutes = new Elysia({ prefix: "/v1/hub" })
             slug: a.slug,
             name: a.name,
             blurb: a.blurb,
+            tagline: a.tagline,
             iconUrl: a.iconKey ? assetPublicUrl(a.iconKey) : null,
+            // The card art. Null means the app has no cover yet — clients must render
+            // an honest empty state rather than inventing placeholder graphics.
+            coverUrl: a.coverKey ? assetPublicUrl(a.coverKey) : null,
+            developer: a.developer,
+            tags: a.tags,
             kind: a.kind,
             homepage: a.homepage,
             latestRelease: r
@@ -182,6 +190,78 @@ export const hubRoutes = new Elysia({ prefix: "/v1/hub" })
         platform: t.Optional(platformSchema),
       }),
     },
+  )
+
+  // The store page: everything the catalogue list omits, plus the newest release per
+  // platform so a client can show "available on" without a request per platform.
+  .get(
+    "/apps/:slug",
+    async ({ params, query, set }) => {
+      const app = await prisma.hubApp.findUnique({
+        where: { slug: params.slug },
+        include: {
+          releases: {
+            where: { channel: query.channel ?? "stable" },
+            orderBy: { publishedAt: "desc" },
+            take: 100,
+          },
+          news: {
+            where: { publishedAt: { not: null } },
+            orderBy: { publishedAt: "desc" },
+            take: 5,
+            select: { slug: true, title: true, publishedAt: true, imageKey: true },
+          },
+        },
+      });
+      if (!app || !app.visible) {
+        set.status = 404;
+        return { error: "not_found" };
+      }
+      // Newest release per platform. The list is already newest-first, so the first
+      // sighting of a platform wins.
+      const perPlatform = new Map<string, (typeof app.releases)[number]>();
+      for (const r of app.releases) if (!perPlatform.has(r.platform)) perPlatform.set(r.platform, r);
+
+      return {
+        app: {
+          id: app.id,
+          slug: app.slug,
+          name: app.name,
+          blurb: app.blurb,
+          tagline: app.tagline,
+          description: app.description,
+          developer: app.developer,
+          publisher: app.publisher,
+          kind: app.kind,
+          tags: app.tags,
+          iconUrl: app.iconKey ? assetPublicUrl(app.iconKey) : null,
+          coverUrl: app.coverKey ? assetPublicUrl(app.coverKey) : null,
+          screenshots: app.screenshots.map((key) => assetPublicUrl(key)),
+          homepage: app.homepage,
+          supportUrl: app.supportUrl,
+          sourceUrl: app.sourceUrl,
+          trailerUrl: app.trailerUrl,
+          releases: [...perPlatform.values()].map((r) => ({
+            id: r.id,
+            version: r.version,
+            channel: r.channel,
+            platform: r.platform,
+            url: r.url,
+            sha256: r.sha256,
+            sizeBytes: Number(r.sizeBytes),
+            notes: r.notes,
+            publishedAt: r.publishedAt,
+          })),
+          news: app.news.map((n) => ({
+            slug: n.slug,
+            title: n.title,
+            publishedAt: n.publishedAt,
+            imageUrl: n.imageKey ? assetPublicUrl(n.imageKey) : null,
+          })),
+        },
+      };
+    },
+    { params: t.Object({ slug: t.String() }), query: t.Object({ channel: t.Optional(channelSchema) }) },
   )
 
   .get(
@@ -322,6 +402,48 @@ const newsPatchBody = t.Object({
   publish: t.Optional(t.Boolean()),
 });
 
+/// Store-page fields shared by app create and patch.
+const appContentFields = {
+  blurb: t.Optional(t.String({ maxLength: 2000 })),
+  tagline: t.Optional(t.String({ maxLength: 300 })),
+  description: t.Optional(t.String({ maxLength: 100_000 })),
+  developer: t.Optional(t.String({ maxLength: 200 })),
+  publisher: t.Optional(t.String({ maxLength: 200 })),
+  tags: t.Optional(t.Array(t.String({ maxLength: 40 }), { maxItems: 20 })),
+  screenshots: t.Optional(t.Array(t.String({ maxLength: 500 }), { maxItems: 12 })),
+  iconKey: t.Optional(t.String({ maxLength: 500 })),
+  coverKey: t.Optional(t.String({ maxLength: 500 })),
+  kind: t.Optional(t.String()),
+  homepage: t.Optional(t.String({ maxLength: 500 })),
+  supportUrl: t.Optional(t.String({ maxLength: 500 })),
+  sourceUrl: t.Optional(t.String({ maxLength: 500 })),
+  trailerUrl: t.Optional(t.String({ maxLength: 500 })),
+  sortOrder: t.Optional(t.Integer({ minimum: -1000, maximum: 1000 })),
+  githubRepo: t.Optional(t.String({ maxLength: 200 })),
+  visible: t.Optional(t.Boolean()),
+};
+
+const appCreateBody = t.Object({
+  name: t.String({ minLength: 1, maxLength: 120 }),
+  slug: t.Optional(t.String()),
+  ...appContentFields,
+});
+
+const appPatchBody = t.Object({
+  name: t.Optional(t.String({ minLength: 1, maxLength: 120 })),
+  slug: t.Optional(t.String()),
+  ...appContentFields,
+});
+
+/// Prisma treats `undefined` as "leave alone" and `null` as "write NULL", but a JSON body
+/// cannot express "leave alone" other than by omission. Absent → skip; empty string →
+/// clear to NULL; anything else → write it. Without this an admin can set a wrong icon or
+/// homepage and then has no way to remove it.
+function clearable<K extends string>(key: K, value: string | undefined) {
+  if (value === undefined) return {};
+  return { [key]: value.trim() === "" ? null : value.trim() } as Record<K, string | null>;
+}
+
 export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
   .use(adminOnly)
 
@@ -408,27 +530,27 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
           slug: body.slug ? slugify(body.slug) : slugify(body.name),
           name: body.name,
           blurb: body.blurb ?? "",
+          tagline: body.tagline ?? "",
+          description: body.description ?? "",
+          developer: body.developer ?? "",
+          publisher: body.publisher ?? "",
+          tags: body.tags ?? [],
+          screenshots: body.screenshots ?? [],
           iconKey: body.iconKey,
+          coverKey: body.coverKey,
           kind: body.kind === "game" ? "game" : "app",
           homepage: body.homepage,
+          supportUrl: body.supportUrl,
+          sourceUrl: body.sourceUrl,
+          trailerUrl: body.trailerUrl,
+          sortOrder: body.sortOrder ?? 0,
           githubRepo: body.githubRepo,
           visible: body.visible ?? false,
         },
       });
       return { id: app.id, slug: app.slug };
     },
-    {
-      body: t.Object({
-        name: t.String({ minLength: 1, maxLength: 120 }),
-        slug: t.Optional(t.String()),
-        blurb: t.Optional(t.String({ maxLength: 2000 })),
-        iconKey: t.Optional(t.String()),
-        kind: t.Optional(t.String()),
-        homepage: t.Optional(t.String()),
-        githubRepo: t.Optional(t.String()),
-        visible: t.Optional(t.Boolean()),
-      }),
-    },
+    { body: appCreateBody },
   )
   .patch(
     "/apps/:id",
@@ -439,27 +561,34 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
         where: { id: params.id },
         data: {
           name: body.name ?? undefined,
+          slug: body.slug ? slugify(body.slug) : undefined,
           blurb: body.blurb ?? undefined,
-          iconKey: body.iconKey ?? undefined,
+          tagline: body.tagline ?? undefined,
+          description: body.description ?? undefined,
+          developer: body.developer ?? undefined,
+          publisher: body.publisher ?? undefined,
+          tags: body.tags ?? undefined,
+          screenshots: body.screenshots ?? undefined,
+          sortOrder: body.sortOrder ?? undefined,
           kind: body.kind === "game" ? "game" : body.kind === "app" ? "app" : undefined,
-          homepage: body.homepage ?? undefined,
-          githubRepo: body.githubRepo ?? undefined,
           visible: body.visible ?? undefined,
+          // Nullable fields take "" as "clear this". `?? undefined` alone means an admin
+          // can set a wrong homepage or a bad icon and then never remove it — the field
+          // is only ever writable to another non-empty value.
+          ...clearable("iconKey", body.iconKey),
+          ...clearable("coverKey", body.coverKey),
+          ...clearable("homepage", body.homepage),
+          ...clearable("supportUrl", body.supportUrl),
+          ...clearable("sourceUrl", body.sourceUrl),
+          ...clearable("trailerUrl", body.trailerUrl),
+          ...clearable("githubRepo", body.githubRepo),
         },
       });
       return { id: app.id, slug: app.slug, visible: app.visible };
     },
     {
       params: t.Object({ id: t.String({ format: "uuid" }) }),
-      body: t.Object({
-        name: t.Optional(t.String({ minLength: 1, maxLength: 120 })),
-        blurb: t.Optional(t.String({ maxLength: 2000 })),
-        iconKey: t.Optional(t.String()),
-        kind: t.Optional(t.String()),
-        homepage: t.Optional(t.String()),
-        githubRepo: t.Optional(t.String()),
-        visible: t.Optional(t.Boolean()),
-      }),
+      body: appPatchBody,
     },
   )
   .delete("/apps/:id", async ({ params }) => {
@@ -589,6 +718,27 @@ export const hubAdminRoutes = new Elysia({ prefix: "/v1/admin/hub" })
       return { key, url: assetPublicUrl(key) };
     },
     { body: t.Object({ file: t.File() }) },
+  )
+
+  // App artwork: icon, cover and screenshots. Content-addressed like news images, so
+  // re-uploading the same file is idempotent and never orphans the previous key while
+  // another app still points at it. Returns the KEY — the caller writes it onto the app
+  // through the normal patch, which keeps "upload" and "assign" separately reversible.
+  .post(
+    "/app-image",
+    async ({ body, set }) => {
+      const file = body.file as File;
+      if (!file || file.size === 0) { set.status = 400; return { error: "missing_file" }; }
+      if (file.size > 20 * 1024 * 1024) { set.status = 413; return { error: "too_large", maxBytes: 20 * 1024 * 1024 }; }
+      const kind = body.kind === "cover" || body.kind === "screenshot" ? body.kind : "icon";
+      const ext = (file.name.match(/\.(png|jpe?g|webp|gif)$/i)?.[1] ?? "png").toLowerCase();
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const hash = createHash("sha256").update(bytes).digest("hex");
+      const key = `apps/${kind}/${hash.slice(0, 2)}/${hash}.${ext}`;
+      await putBytes(key, bytes, file.type || "image/png");
+      return { key, url: assetPublicUrl(key), kind };
+    },
+    { body: t.Object({ file: t.File(), kind: t.Optional(t.String()) }) },
   )
 
   // Large builds must not stream through the API (proxies cap request bodies), so the
