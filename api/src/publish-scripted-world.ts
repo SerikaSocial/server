@@ -164,9 +164,12 @@ try {
 
     console.log(`\nPublished scripted world ${finalId} version ${versionNumber}; CDN SHA-256 verified.`);
   }
+} catch (error) {
+  console.error(error instanceof Error ? error.message : error);
+  process.exitCode = 1;
 } finally {
   await prisma.$disconnect();
   // Prisma's pool keeps the loop alive even after disconnect, so a one-shot script hangs
   // forever after doing its work. Exit explicitly rather than leaving the caller to time out.
-  process.exit(0);
+  process.exit(process.exitCode ?? 0);
 }

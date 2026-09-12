@@ -18,13 +18,13 @@ import { authed } from "../auth-plugin.ts";
 import { prisma, redis } from "../db.ts";
 import {
   assignRoles,
+  minimumPlayers, validGameMode, validFinish, evaluateRope,
+  validStationTask,
   canKill,
   evaluateGauntlet,
   evaluateImposter,
   GameMode,
   MEETING_SECONDS,
-  MIN_PLAYERS_GAUNTLET,
-  MIN_PLAYERS_IMPOSTER,
   Outcome,
   Phase,
   resolveRound,
@@ -42,6 +42,7 @@ const k = {
   meta: (i: string) => `game:${i}:meta`,
   roles: (i: string) => `game:${i}:roles`,
   alive: (i: string) => `game:${i}:alive`,
+  completed: (i: string) => `game:${i}:completed`,
   tasks: (i: string) => `game:${i}:tasks`,
   votes: (i: string) => `game:${i}:votes`,
   lastKill: (i: string, u: string) => `game:${i}:kill:${u}`,
@@ -89,6 +90,7 @@ async function getMeta(instanceId: string) {
     phase: Number(m.phase) as PhaseId,
     outcome: Number(m.outcome ?? 0),
     startedAt: Number(m.startedAt ?? 0),
+    roundStartedAt: Number(m.roundStartedAt ?? m.startedAt ?? 0),
     meetingEndsAt: Number(m.meetingEndsAt ?? 0),
     round: Number(m.round ?? 0),
     maxRounds: Number(m.maxRounds ?? 3),
@@ -141,18 +143,20 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
       // The roster is the source of truth for who is playing. A client-supplied list would let a
       // host invent players or omit one to skew role odds.
       const roster = await redis.hkeys(`inst:${params.id}:roster`);
-      const mode = body.mode === GameMode.Gauntlet ? GameMode.Gauntlet : GameMode.Imposter;
-      const min = mode === GameMode.Imposter ? MIN_PLAYERS_IMPOSTER : MIN_PLAYERS_GAUNTLET;
+      const mode = body.mode ?? GameMode.Imposter;
+      if (!validGameMode(mode)) { set.status = 400; return { error: "invalid_mode" }; }
+      const min = minimumPlayers(mode);
       if (roster.length < min) {
         set.status = 409;
         return { error: "not_enough_players", need: min, have: roster.length };
       }
 
       const pipeline = redis.pipeline();
-      for (const key of [k.roles, k.alive, k.tasks, k.votes, k.finished, k.events]) {
+      for (const key of [k.roles, k.alive, k.tasks, k.completed, k.votes, k.finished, k.events]) {
         pipeline.del(key(params.id));
       }
 
+      for (const user of roster) pipeline.del(k.lastKill(params.id, user));
       if (mode === GameMode.Imposter) {
         const roles = assignRoles(roster);
         pipeline.hset(k.roles(params.id), Object.fromEntries([...roles].map(([u, r]) => [u, String(r)])));
@@ -163,9 +167,10 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
         phase: String(Phase.Playing),
         outcome: "0",
         startedAt: String(Date.now()),
+        roundStartedAt: String(Date.now()),
         meetingEndsAt: "0",
         round: "1",
-        maxRounds: String(Math.max(1, Math.min(10, Number(body.rounds ?? 3)))),
+        maxRounds: mode === GameMode.Gauntlet ? "3" : "1",
         hostId: session.sub,
       });
       await pipeline.exec();
@@ -191,6 +196,9 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
       redis.get(k.lastKill(params.id, session.sub)),
     ]);
 
+    const completedTasks = (await redis.hkeys(k.completed(params.id)))
+      .filter(key => key.startsWith(`${session.sub}:`)).map(key => Number(key.slice(session.sub.length + 1)));
+    const finishIndex = meta.mode !== GameMode.Imposter ? await redis.lpos(k.finished(params.id), session.sub) : null;
     // A player not in the session gets a null role rather than a 403 — spectators exist, and
     // leaking "you are not in this game" vs "you are crew" through a status code is a tell.
     return {
@@ -198,6 +206,8 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
       alive: alive === "1",
       tasks: Number(tasks ?? 0),
       tasksRequired: TASKS_PER_CREW,
+      completedTasks,
+      place: finishIndex === null ? 0 : finishIndex + 1,
       killReadyAt: lastKill ? Number(lastKill) + 25_000 : 0,
       phase: meta.phase,
     };
@@ -206,14 +216,30 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
   /// Public state. Counts and phase only — never the role map while the game is live.
   .get("/:id/state", async ({ params, session, set }) => {
     if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
-    const meta = await getMeta(params.id);
+    let meta = await getMeta(params.id);
     if (!meta) { set.status = 404; return { error: "no_session" }; }
 
+    // Departed players cannot hold a co-op summit (or an empty match) open forever.
+    if (meta.phase === Phase.Playing || meta.phase === Phase.Meeting) {
+      const roster = new Set(await redis.hkeys(`inst:${params.id}:roster`));
+      const current = await loadSnapshot(params.id);
+      for (const id of current.alive) if (!roster.has(id)) await redis.hset(k.alive(params.id), id, "0");
+      if (meta.mode === GameMode.Rope) await settleRope(params.id);
+      else if (meta.mode === GameMode.Imposter) await settleImposter(params.id);
+      else if (![...current.alive].some(id => roster.has(id))) {
+        await redis.hset(k.meta(params.id), { phase: String(Phase.Ended), outcome: String(Outcome.Abandoned) });
+        await pushEvent(params.id, { type: "ended", outcome: Outcome.Abandoned });
+      }
+      meta = (await getMeta(params.id))!;
+    }
     const snap = await loadSnapshot(params.id);
     const events = (await redis.lrange(k.events(params.id), 0, 24)).map((e) => JSON.parse(e));
 
     return {
       mode: meta.mode,
+      startedAt: meta.startedAt,
+      roundStartedAt: meta.roundStartedAt,
+      finishedCount: await redis.llen(k.finished(params.id)),
       phase: meta.phase,
       outcome: meta.outcome,
       round: meta.round,
@@ -227,26 +253,38 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
   })
 
   /// Complete one task. The server counts; a client cannot report a total.
-  .post("/:id/task", async ({ params, session, set }) => {
+  .post("/:id/task", async ({ params, body, session, set }) => {
     if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
     const meta = await getMeta(params.id);
-    if (!meta || meta.phase !== Phase.Playing) { set.status = 409; return { error: "not_playing" }; }
+    if (!meta || meta.mode !== GameMode.Imposter || meta.phase !== Phase.Playing) { set.status = 409; return { error: "not_playing" }; }
 
+    if (meta.mode !== GameMode.Imposter || !validStationTask(body.taskId)) {
+      set.status = 400; return { error: "invalid_task" };
+    }
     const [role, alive] = await Promise.all([
       redis.hget(k.roles(params.id), session.sub),
       redis.hget(k.alive(params.id), session.sub),
     ]);
     if (alive !== "1") { set.status = 409; return { error: "dead" }; }
     // An imposter "completing" tasks must not advance the crew's win condition.
-    if (Number(role) !== Role.Crew) { set.status = 403; return { error: "not_crew" }; }
+    if (role === null || Number(role) !== Role.Crew) { set.status = 403; return { error: "not_crew" }; }
 
-    const done = await redis.hincrby(k.tasks(params.id), session.sub, 1);
-    // Clamp so a burst of requests cannot overshoot and skew the win check.
-    if (done > TASKS_PER_CREW) await redis.hset(k.tasks(params.id), session.sub, String(TASKS_PER_CREW));
+    // Claim the console and increment together. Repeated presses and simultaneous requests
+    // cannot count a room twice, including after reconnecting or restarting the client.
+    const done = Number(await redis.eval(`
+      if redis.call('HSETNX', KEYS[1], ARGV[1], '1') == 1 then
+        redis.call('EXPIRE', KEYS[1], ARGV[3])
+        local total = redis.call('HINCRBY', KEYS[2], ARGV[2], 1)
+        redis.call('EXPIRE', KEYS[2], ARGV[3])
+        if total > tonumber(ARGV[4]) then redis.call('HSET', KEYS[2], ARGV[2], ARGV[4]) end
+      end
+      return tonumber(redis.call('HGET', KEYS[2], ARGV[2]) or '0')`,
+      2, k.completed(params.id), k.tasks(params.id), `${session.sub}:${body.taskId}`,
+      session.sub, String(SESSION_TTL_SECONDS), String(TASKS_PER_CREW)));
 
     const outcome = await settleImposter(params.id);
     return { tasks: Math.min(done, TASKS_PER_CREW), required: TASKS_PER_CREW, outcome };
-  })
+  }, { body: t.Object({ taskId: t.Number() }) })
 
   /// Attempt a kill. Every condition is checked here.
   .post(
@@ -278,7 +316,7 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
   .post("/:id/report", async ({ params, session, set }) => {
     if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
     const meta = await getMeta(params.id);
-    if (!meta || meta.phase !== Phase.Playing) { set.status = 409; return { error: "not_playing" }; }
+    if (!meta || meta.mode !== GameMode.Imposter || meta.phase !== Phase.Playing) { set.status = 409; return { error: "not_playing" }; }
     if ((await redis.hget(k.alive(params.id), session.sub)) !== "1") { set.status = 409; return { error: "dead" }; }
 
     const endsAt = Date.now() + MEETING_SECONDS * 1000;
@@ -294,7 +332,7 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
     async ({ params, body, session, set }) => {
       if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
       const meta = await getMeta(params.id);
-      if (!meta || meta.phase !== Phase.Meeting) { set.status = 409; return { error: "not_meeting" }; }
+      if (!meta || meta.mode !== GameMode.Imposter || meta.phase !== Phase.Meeting) { set.status = 409; return { error: "not_meeting" }; }
       if ((await redis.hget(k.alive(params.id), session.sub)) !== "1") { set.status = 409; return { error: "dead" }; }
 
       await redis.hset(k.votes(params.id), session.sub, body.targetId);
@@ -314,7 +352,7 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
   .post("/:id/close-meeting", async ({ params, session, set }) => {
     if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
     const meta = await getMeta(params.id);
-    if (!meta || meta.phase !== Phase.Meeting) { set.status = 409; return { error: "not_meeting" }; }
+    if (!meta || meta.mode !== GameMode.Imposter || meta.phase !== Phase.Meeting) { set.status = 409; return { error: "not_meeting" }; }
     // Anyone may trigger the close, but only once the clock has actually run out — otherwise a
     // single player could cut short a discussion they were losing.
     if (Date.now() < meta.meetingEndsAt && meta.hostId !== session.sub) {
@@ -326,35 +364,57 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
 
   /// Gauntlet: report reaching the finish line. The SERVER assigns placement by arrival order,
   /// so a client cannot claim a better position than it earned.
-  .post("/:id/finish", async ({ params, session, set }) => {
+  .post("/:id/finish", async ({ params, body, session, set }) => {
     if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
     const meta = await getMeta(params.id);
-    if (!meta || meta.mode !== GameMode.Gauntlet || meta.phase !== Phase.Playing) {
+    if (!meta || meta.mode === GameMode.Imposter || meta.phase !== Phase.Playing) {
       set.status = 409; return { error: "not_playing" };
+    }
+    if (!validFinish(body.round, body.startedAt, meta.round, meta.startedAt, meta.roundStartedAt, Date.now())) {
+      set.status = 409; return { error: "stale_round_or_countdown" };
     }
     if ((await redis.hget(k.alive(params.id), session.sub)) !== "1") { set.status = 409; return { error: "eliminated" }; }
     if (!await requireMember(params.id, session.sub)) { set.status = 403; return { error: "not_in_instance" }; }
 
     // A list, appended once per player: the first report wins and later ones are ignored.
-    const already = await redis.lpos(k.finished(params.id), session.sub);
-    if (already !== null) return { ok: true, place: already + 1, duplicate: true };
-
-    await redis.rpush(k.finished(params.id), session.sub);
-    const place = await redis.llen(k.finished(params.id));
+    const result = await redis.eval(`
+      if redis.call('HGET', KEYS[2], 'phase') ~= '1' or
+         redis.call('HGET', KEYS[2], 'round') ~= ARGV[3] or
+         redis.call('HGET', KEYS[2], 'startedAt') ~= ARGV[4] then return {0, -1} end
+      local existing = redis.call('LPOS', KEYS[1], ARGV[1])
+      if existing then return {existing + 1, 1} end
+      local place = redis.call('RPUSH', KEYS[1], ARGV[1])
+      redis.call('EXPIRE', KEYS[1], ARGV[2])
+      return {place, 0}`, 2, k.finished(params.id), k.meta(params.id), session.sub,
+      String(SESSION_TTL_SECONDS), String(body.round), String(body.startedAt)) as number[];
+    if (Number(result[1]) === -1) { set.status = 409; return { error: "stale_round" }; }
+    const place = Number(result[0]);
+    if (Number(result[1]) === 1) return { ok: true, place, duplicate: true };
     await pushEvent(params.id, { type: "finished", userId: session.sub, place });
+    if (meta.mode === GameMode.Rope) await settleRope(params.id);
     return { ok: true, place };
+  }, { body: t.Object({ round: t.Number(), startedAt: t.Number() }) })
+
+  .post("/:id/abort", async ({ params, session, set }) => {
+    if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
+    const meta = await getMeta(params.id);
+    if (!meta || meta.hostId !== session.sub) { set.status = 403; return { error: "not_host" }; }
+    await redis.hset(k.meta(params.id), { phase: String(Phase.Ended), outcome: String(Outcome.Abandoned) });
+    await pushEvent(params.id, { type: "ended", outcome: Outcome.Abandoned });
+    return { ok: true };
   })
 
   /// Gauntlet: close the round, eliminate the slowest, and either start the next or end it.
   .post("/:id/end-round", async ({ params, session, set }) => {
     if (!session?.sub) { set.status = 401; return { error: "unauthorized" }; }
     const meta = await getMeta(params.id);
-    if (!meta || meta.mode !== GameMode.Gauntlet) { set.status = 409; return { error: "not_gauntlet" }; }
+    if (!meta || meta.mode !== GameMode.Gauntlet || meta.phase !== Phase.Playing) { set.status = 409; return { error: "not_gauntlet" }; }
     if (meta.hostId !== session.sub) { set.status = 403; return { error: "not_host" }; }
 
     const snap = await loadSnapshot(params.id);
     const finished = await redis.lrange(k.finished(params.id), 0, -1);
-    const { qualified, eliminated } = resolveRound({ entrants: [...snap.alive], finished });
+    if (finished.length === 0) { set.status = 409; return { error: "no_finishers" }; }
+    const { qualified, eliminated } = resolveRound({ entrants: [...snap.alive], finished }, meta.round >= meta.maxRounds);
 
     const pipeline = redis.pipeline();
     for (const u of eliminated) pipeline.hset(k.alive(params.id), u, "0");
@@ -366,7 +426,7 @@ export const gameRoutes = new Elysia({ prefix: "/v1/games" })
       await redis.hset(k.meta(params.id), { phase: String(Phase.Ended), outcome: String(outcome) });
       await pushEvent(params.id, { type: "ended", outcome, winners: qualified });
     } else {
-      await redis.hset(k.meta(params.id), { round: String(meta.round + 1) });
+      await redis.hset(k.meta(params.id), { round: String(meta.round + 1), roundStartedAt: String(Date.now()) });
       await pushEvent(params.id, { type: "round", round: meta.round + 1, qualified, eliminated });
     }
     return { qualified, eliminated, outcome, round: meta.round + 1 };
@@ -398,4 +458,15 @@ async function closeMeeting(instanceId: string) {
 
   const outcome = await settleImposter(instanceId);
   return { ejected: result.ejected, tied: result.tied, role: ejectedRole, outcome };
+}
+
+async function settleRope(instanceId: string) {
+  const snap = await loadSnapshot(instanceId);
+  const finished = await redis.lrange(k.finished(instanceId), 0, -1);
+  const outcome = evaluateRope([...snap.alive], finished);
+  if (outcome !== Outcome.None) {
+    await redis.hset(k.meta(instanceId), { phase: String(Phase.Ended), outcome: String(outcome) });
+    await pushEvent(instanceId, { type: "ended", outcome, winners: [...snap.alive] });
+  }
+  return outcome;
 }

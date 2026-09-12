@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   assignRoles,
+  minimumPlayers, validGameMode, validFinish, evaluateRope,
   canKill,
   evaluateGauntlet,
   evaluateImposter,
@@ -215,13 +216,14 @@ describe("kill authorisation", () => {
 });
 
 describe("gauntlet rounds", () => {
-  test("always cuts at least one while more than one remains", () => {
-    for (let n = 2; n <= 32; n++) {
+  test("preserves a two-player final and cuts larger fields", () => {
+    for (let n = 3; n <= 32; n++) {
       const s = survivorsForRound(n);
       expect(s).toBeGreaterThanOrEqual(1);
       expect(s).toBeLessThan(n);
     }
     expect(survivorsForRound(1)).toBe(1);
+    expect(survivorsForRound(2)).toBe(2);
   });
 
   test("finishers qualify in order and the rest are out", () => {
@@ -253,9 +255,47 @@ describe("gauntlet rounds", () => {
     expect(evaluateGauntlet(r.qualified, 1, 3)).toBe(Outcome.Abandoned);
   });
 
-  test("one player left wins", () => {
-    expect(evaluateGauntlet(["a"], 1, 3)).toBe(Outcome.GauntletWin);
+  test("even a solo run reaches all three arenas before winning", () => {
+    expect(evaluateGauntlet(["a"], 1, 3)).toBe(Outcome.None);
+    expect(evaluateGauntlet(["a"], 3, 3)).toBe(Outcome.GauntletWin);
     expect(evaluateGauntlet(["a", "b"], 1, 3)).toBe(Outcome.None);
     expect(evaluateGauntlet(["a", "b"], 3, 3)).toBe(Outcome.GauntletWin);
   });
+});
+
+
+describe("station task identity", () => {
+  test("only the ten authored consoles are tasks", async () => {
+    const { validStationTask } = await import("./gamemode.ts");
+    for (const id of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]) expect(validStationTask(id)).toBe(true);
+    for (const id of [-1, 10, 20, 1.5, NaN, Infinity]) expect(validStationTask(id)).toBe(false);
+  });
+});
+
+
+test("the final gauntlet round crowns only its first finisher", () => {
+  const result = resolveRound({ entrants: ["a", "b", "c", "d"], finished: ["c", "a", "d"] }, true);
+  expect(result.qualified).toEqual(["c"]);
+  expect(result.eliminated).toEqual(["a", "b", "d"]);
+});
+
+
+test("lobbies support solo courses, require four for hidden roles, and reject unknown modes", () => {
+  expect(minimumPlayers(0)).toBe(4);
+  expect(minimumPlayers(1)).toBe(1);
+  expect(minimumPlayers(2)).toBe(1);
+  for (const mode of [0,1,2]) expect(validGameMode(mode)).toBe(true);
+  for (const mode of [-1,3,NaN]) expect(validGameMode(mode)).toBe(false);
+});
+test("delayed finishes cannot credit the next round, a restarted game or the countdown", () => {
+  expect(validFinish(1,100,1,100,1000,4000)).toBe(true);
+  expect(validFinish(1,100,2,100,1000,4000)).toBe(false);
+  expect(validFinish(1,99,1,100,1000,4000)).toBe(false);
+  expect(validFinish(1,100,1,100,1000,3999)).toBe(false);
+});
+test("co-op finishes only when every remaining entrant reaches the summit", () => {
+  expect(evaluateRope(["a","b"],["a"])).toBe(Outcome.None);
+  expect(evaluateRope(["a","b"],["a","b"])).toBe(Outcome.RopeWin);
+  expect(evaluateRope(["a"],["a"])).toBe(Outcome.RopeWin);
+  expect(evaluateRope([],["a"])).toBe(Outcome.Abandoned);
 });

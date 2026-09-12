@@ -14,13 +14,14 @@
  * world. routes/games.ts owns the I/O and calls in here for every decision.
  */
 
-/// What kind of session this is. Both modes share phases, membership and elimination; they
+/// What kind of session this is. The modes share phases and membership; they
 /// differ in what ends a round.
 export const GameMode = {
   /// Hidden role. Crew complete tasks, imposters kill, meetings eject.
   Imposter: 0,
   /// Elimination race. Each round, the slowest are cut until a winner remains.
   Gauntlet: 1,
+  Rope: 2,
 } as const;
 export type GameModeId = (typeof GameMode)[keyof typeof GameMode];
 
@@ -48,14 +49,29 @@ export const Outcome = {
   GauntletWin: 3,
   /// Not enough players left to continue meaningfully.
   Abandoned: 4,
+  RopeWin: 5,
 } as const;
 export type OutcomeId = (typeof Outcome)[keyof typeof Outcome];
 
 export const MIN_PLAYERS_IMPOSTER = 4;
-export const MIN_PLAYERS_GAUNTLET = 2;
+export const MIN_PLAYERS_GAUNTLET = 1; // one player runs the same three stages as a time trial
+export function minimumPlayers(mode: number): number { return mode === GameMode.Imposter ? 4 : 1; }
+export function validGameMode(mode: number): boolean { return mode === 0 || mode === 1 || mode === 2; }
+export function validFinish(round: number, startedAt: number, expectedRound: number, expectedStart: number,
+  roundStart: number, now: number): boolean {
+  return round === expectedRound && startedAt === expectedStart && now >= roundStart + 3000;
+}
+export function evaluateRope(entrants: string[], finished: string[]): OutcomeId {
+  if (entrants.length === 0) return Outcome.Abandoned;
+  return entrants.every(id => finished.includes(id)) ? Outcome.RopeWin : Outcome.None;
+}
 
 /// Tasks each crewmate must finish before the crew win by task completion.
 export const TASKS_PER_CREW = 5;
+export const STATION_TASK_IDS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] as const;
+export function validStationTask(taskId: number): boolean {
+  return Number.isInteger(taskId) && STATION_TASK_IDS.includes(taskId as typeof STATION_TASK_IDS[number]);
+}
 
 /// Seconds an imposter must wait between kills. Server-enforced: the client asks, the server
 /// decides. A client-side cooldown is a suggestion.
@@ -200,18 +216,18 @@ export function canKill(
   // Imposters cannot kill each other — it is never a strategy, only a grief.
   if (s.roles.get(targetId) === Role.Imposter) return "target_imposter";
   if (secondsSinceLastKill < KILL_COOLDOWN_SECONDS) return "cooldown";
-  if (!(claimedDistance <= KILL_MAX_DISTANCE)) return "too_far"; // NaN-safe
+  if (!(claimedDistance >= 0 && claimedDistance <= KILL_MAX_DISTANCE)) return "too_far"; // NaN-safe
   return null;
 }
 
 // ── Gauntlet (elimination race) ───────────────────────────────────────────────────────────────
 
-/// How many players survive a round given how many started it. Always cuts at least one while
-/// more than one remains, and never cuts everybody — a round that eliminates the entire field
+/// How many players survive a round given how many started it. Cuts larger fields while preserving a two-player final,
+/// and never cuts everybody — a round that eliminates the entire field
 /// leaves no winner and no way to end.
 export function survivorsForRound(entrants: number): number {
   if (entrants <= 1) return entrants;
-  if (entrants === 2) return 1;
+  if (entrants === 2) return 2; // keep a two-player show alive until the final arena
   return Math.max(1, Math.ceil(entrants * 0.6));
 }
 
@@ -226,9 +242,9 @@ export interface GauntletRound {
 ///
 /// Finish ORDER is the authoritative record and the server assigns it on arrival, so a client
 /// cannot claim a better placement after the fact.
-export function resolveRound(round: GauntletRound): { qualified: string[]; eliminated: string[] } {
+export function resolveRound(round: GauntletRound, finalRound = false): { qualified: string[]; eliminated: string[] } {
   const entrants = [...new Set(round.entrants)];
-  const seats = survivorsForRound(entrants.length);
+  const seats = finalRound ? Math.min(1, entrants.length) : survivorsForRound(entrants.length);
 
   const qualified: string[] = [];
   for (const id of round.finished) {
@@ -244,7 +260,6 @@ export function resolveRound(round: GauntletRound): { qualified: string[]; elimi
 
 export function evaluateGauntlet(remaining: string[], roundsPlayed: number, maxRounds: number): OutcomeId {
   if (remaining.length === 0) return Outcome.Abandoned;
-  if (remaining.length === 1) return Outcome.GauntletWin;
   if (roundsPlayed >= maxRounds) return Outcome.GauntletWin;
   return Outcome.None;
 }
